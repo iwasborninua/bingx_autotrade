@@ -450,9 +450,24 @@ async def infer_missing_position_reason(client: BingXClient, trade: dict[str, An
     if reached_price(trade["direction"], current_price, trade["tp3_price"]):
         return "TP3_REACHED"
     if stop_reached(trade["direction"], current_price, trade["current_sl_price"]):
-        return "STOP_LOSS_REACHED"
+        return stop_close_reason(trade)
 
     return "USER_CLOSED_OR_EXCHANGE_CLOSED"
+
+
+def stop_close_reason(trade: dict[str, Any]) -> str:
+    direction = str(trade["direction"])
+    current_stop = to_decimal(trade.get("current_sl_price"), default=None)
+    tp1_price = to_decimal(trade.get("tp1_price"), default=None)
+
+    if trade.get("tp2_reached_at") is not None:
+        return "TP2_STOP_TRIGGERED"
+    if current_stop is not None and tp1_price is not None and reached_price(direction, current_stop, tp1_price):
+        return "TP1_STOP_TRIGGERED"
+    if trade.get("tp1_reached_at") is not None:
+        return "TP1_STOP_TRIGGERED"
+
+    return "STOP_LOSS_REACHED"
 
 
 async def closed_trade_result_from_history(

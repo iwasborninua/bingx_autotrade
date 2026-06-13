@@ -344,7 +344,7 @@ async def trade_stats(connection) -> dict[str, Any]:
                 SUM(status IN ('OPENING', 'OPEN')) AS active_trades,
                 SUM(status = 'CLOSED') AS closed_trades,
                 SUM(status = 'CLOSED' AND close_reason LIKE 'TP%%') AS tp_trades,
-                SUM(status = 'CLOSED' AND close_reason LIKE '%%STOP%%') AS sl_trades,
+                SUM(status = 'CLOSED' AND close_reason LIKE '%%STOP%%' AND close_reason NOT LIKE 'TP%%') AS sl_trades,
                 COALESCE(SUM(CASE WHEN status IN ('OPENING', 'OPEN') THEN last_pnl ELSE 0 END), 0) AS active_pnl,
                 COALESCE(SUM(CASE WHEN status IN ('OPENING', 'OPEN') THEN margin ELSE 0 END), 0) AS active_margin,
                 COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END), 0) AS closed_pnl,

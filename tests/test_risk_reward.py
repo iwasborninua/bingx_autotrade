@@ -1,7 +1,7 @@
 from decimal import Decimal
 import unittest
 
-from app.services.bingx_trader import risk_reward_ratio
+from app.services.bingx_trader import risk_reward_ratio, stop_close_reason
 
 
 class RiskRewardRatioTest(unittest.TestCase):
@@ -25,6 +25,50 @@ class RiskRewardRatioTest(unittest.TestCase):
         self.assertEqual(
             risk_reward_ratio("SELL", Decimal("100"), Decimal("95"), Decimal("80")),
             Decimal("0"),
+        )
+
+
+class StopCloseReasonTest(unittest.TestCase):
+    def test_stop_at_tp1_counts_as_tp(self) -> None:
+        self.assertEqual(
+            stop_close_reason(
+                {
+                    "direction": "BUY",
+                    "current_sl_price": Decimal("110"),
+                    "tp1_price": Decimal("110"),
+                    "tp1_reached_at": None,
+                    "tp2_reached_at": None,
+                }
+            ),
+            "TP1_STOP_TRIGGERED",
+        )
+
+    def test_tp2_reached_counts_as_tp2_even_when_stop_triggers(self) -> None:
+        self.assertEqual(
+            stop_close_reason(
+                {
+                    "direction": "SELL",
+                    "current_sl_price": Decimal("90"),
+                    "tp1_price": Decimal("90"),
+                    "tp1_reached_at": None,
+                    "tp2_reached_at": object(),
+                }
+            ),
+            "TP2_STOP_TRIGGERED",
+        )
+
+    def test_initial_stop_counts_as_sl(self) -> None:
+        self.assertEqual(
+            stop_close_reason(
+                {
+                    "direction": "BUY",
+                    "current_sl_price": Decimal("95"),
+                    "tp1_price": Decimal("110"),
+                    "tp1_reached_at": None,
+                    "tp2_reached_at": None,
+                }
+            ),
+            "STOP_LOSS_REACHED",
         )
 
 
