@@ -544,6 +544,10 @@ async def current_market_price(client: BingXClient, contract_symbol: str) -> Dec
 
 
 async def infer_missing_position_reason(client: BingXClient, trade: dict[str, Any], current_price: Decimal) -> str:
+    return infer_missing_position_reason_from_price(trade, current_price)
+
+
+def infer_missing_position_reason_from_price(trade: dict[str, Any], current_price: Decimal) -> str:
     if reached_price(trade["direction"], current_price, trade["tp3_price"]):
         return "TP3_REACHED"
     if stop_reached(trade["direction"], current_price, trade["current_sl_price"]):

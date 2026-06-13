@@ -1,7 +1,12 @@
 from decimal import Decimal
 import unittest
 
-from app.services.bingx_trader import make_client_order_id, risk_reward_ratio, stop_close_reason
+from app.services.bingx_trader import (
+    infer_missing_position_reason_from_price,
+    make_client_order_id,
+    risk_reward_ratio,
+    stop_close_reason,
+)
 
 
 class RiskRewardRatioTest(unittest.TestCase):
@@ -70,6 +75,38 @@ class StopCloseReasonTest(unittest.TestCase):
             ),
             "STOP_LOSS_REACHED",
         )
+
+
+class MissingPositionReasonTest(unittest.TestCase):
+    def test_manual_or_exchange_close_is_recorded_when_price_did_not_hit_targets(self) -> None:
+        reason = infer_missing_position_reason_from_price(
+            {
+                "direction": "BUY",
+                "current_sl_price": Decimal("95"),
+                "tp3_price": Decimal("120"),
+                "tp1_price": Decimal("110"),
+                "tp1_reached_at": None,
+                "tp2_reached_at": None,
+            },
+            Decimal("101"),
+        )
+
+        self.assertEqual(reason, "USER_CLOSED_OR_EXCHANGE_CLOSED")
+
+    def test_missing_position_at_stop_price_records_stop_reason(self) -> None:
+        reason = infer_missing_position_reason_from_price(
+            {
+                "direction": "SELL",
+                "current_sl_price": Decimal("105"),
+                "tp3_price": Decimal("80"),
+                "tp1_price": Decimal("90"),
+                "tp1_reached_at": None,
+                "tp2_reached_at": None,
+            },
+            Decimal("106"),
+        )
+
+        self.assertEqual(reason, "STOP_LOSS_REACHED")
 
 
 class ClientOrderIdTest(unittest.TestCase):
