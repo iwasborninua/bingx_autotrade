@@ -2,6 +2,9 @@ from decimal import Decimal
 import re
 
 
+SIGNED_DECIMAL = r"([+-]?[0-9]+(?:\.[0-9]+)?)"
+
+
 def parse_signal(text: str) -> dict[str, object]:
     """Parse a Telegram trading signal into columns used by the signals table."""
     open_interest_raw = parse_open_interest_raw(text)
@@ -9,23 +12,24 @@ def parse_signal(text: str) -> dict[str, object]:
     return {
         "symbol": parse_symbol(text),
         "direction": parse_direction(text),
-        "price": parse_decimal(r"Price:\s*\$?([0-9]+(?:\.[0-9]+)?)", text),
-        "change_24h": parse_decimal(r"24h Change:\s*([+-]?[0-9]+(?:\.[0-9]+)?)%", text),
-        "rsi_14": parse_decimal(r"RSI\s*\(14\):\s*([0-9]+(?:\.[0-9]+)?)", text),
+        "price": parse_price(rf"Price:\s*\$?{SIGNED_DECIMAL}", text),
+        "change_24h": parse_decimal(rf"24h Change:\s*{SIGNED_DECIMAL}%", text),
+        "rsi_14": parse_decimal(rf"RSI\s*\(14\):\s*{SIGNED_DECIMAL}", text),
         "market_sentiment": parse_int(r"Market Sentiment:\s*([0-9]+)\s*/\s*100", text),
         "macd": parse_text_line(r"MACD:\s*([^\r\n]+)", text),
         "open_interest_raw": open_interest_raw,
         "open_interest_value": parse_open_interest_value(open_interest_raw),
-        "funding_rate": parse_decimal(r"Funding Rate:\s*([+-]?[0-9]+(?:\.[0-9]+)?)%", text),
-        "signal_score": parse_decimal(r"Signal Score:\s*([+-]?[0-9]+(?:\.[0-9]+)?)", text),
-        "sl_price": parse_decimal(r"Stop Loss:\s*\$?([0-9]+(?:\.[0-9]+)?)", text),
+        "funding_rate": parse_decimal(rf"Funding Rate:\s*{SIGNED_DECIMAL}%", text),
+        "signal_score": parse_decimal(rf"Signal Score:\s*{SIGNED_DECIMAL}", text),
+        "sl_price": parse_price(rf"Stop Loss:\s*\$?{SIGNED_DECIMAL}", text),
         "sl_percent": parse_decimal(
-            r"Stop Loss:\s*\$?[0-9]+(?:\.[0-9]+)?\s*\(([0-9]+(?:\.[0-9]+)?)%\)",
+            rf"Stop Loss:\s*\$?{SIGNED_DECIMAL}\s*\(([0-9]+(?:\.[0-9]+)?)%\)",
             text,
+            group=2,
         ),
-        "tp1_price": parse_decimal(r"TP1:\s*\$?([0-9]+(?:\.[0-9]+)?)", text),
-        "tp2_price": parse_decimal(r"TP2:\s*\$?([0-9]+(?:\.[0-9]+)?)", text),
-        "tp3_price": parse_decimal(r"TP3:\s*\$?([0-9]+(?:\.[0-9]+)?)", text),
+        "tp1_price": parse_price(rf"TP1:\s*\$?{SIGNED_DECIMAL}", text),
+        "tp2_price": parse_price(rf"TP2:\s*\$?{SIGNED_DECIMAL}", text),
+        "tp3_price": parse_price(rf"TP3:\s*\$?{SIGNED_DECIMAL}", text),
     }
 
 
@@ -50,11 +54,18 @@ def parse_direction(text: str) -> str | None:
     return None
 
 
-def parse_decimal(pattern: str, text: str) -> Decimal | None:
+def parse_decimal(pattern: str, text: str, *, group: int = 1) -> Decimal | None:
     match = re.search(pattern, text, flags=re.IGNORECASE)
     if not match:
         return None
-    return Decimal(match.group(1).replace(",", "").replace("+", ""))
+    return Decimal(match.group(group).replace(",", "").replace("+", ""))
+
+
+def parse_price(pattern: str, text: str, *, group: int = 1) -> Decimal | None:
+    value = parse_decimal(pattern, text, group=group)
+    if value is None:
+        return None
+    return abs(value)
 
 
 def parse_int(pattern: str, text: str) -> int | None:

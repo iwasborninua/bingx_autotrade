@@ -28,7 +28,7 @@ async def handle_new_signal(
     symbol = str(fields.get("symbol") or "UNKNOWN")
     contract_symbol = normalize_contract_symbol(symbol) if symbol != "UNKNOWN" else "UNKNOWN"
 
-    eligible, reason = await signal_is_eligible(connection, fields)
+    eligible, reason = await signal_is_eligible(connection, fields, contract_symbol=contract_symbol)
     if not eligible:
         await signal_repository.update_signal_status(
             connection,
@@ -45,6 +45,18 @@ async def handle_new_signal(
     tp1_price = to_decimal(fields["tp1_price"])
     tp2_price = to_decimal(fields["tp2_price"])
     tp3_price = to_decimal(fields["tp3_price"])
+
+    exchange_position = await find_exchange_position(client, contract_symbol, direction=None)
+    if exchange_position:
+        reason = f"Position already exists on BingX for {contract_symbol}"
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="SKIPPED",
+            skip_reason=reason,
+        )
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {reason}")
+        return
 
     try:
         contract = await get_contract(client, contract_symbol)
@@ -280,7 +292,12 @@ async def sync_one_open_trade(
     await trade_repository.update_trade_market(connection, trade_id=trade["id"], price=current_price, roi=roi, pnl=pnl)
 
 
-async def signal_is_eligible(connection, fields: dict[str, object]) -> tuple[bool, str | None]:
+async def signal_is_eligible(
+    connection,
+    fields: dict[str, object],
+    *,
+    contract_symbol: str | None = None,
+) -> tuple[bool, str | None]:
     signal_score = to_decimal(fields.get("signal_score"), default=None)
     if signal_score is None:
         return False, "Signal score is missing"
@@ -288,8 +305,11 @@ async def signal_is_eligible(connection, fields: dict[str, object]) -> tuple[boo
         return False, f"Signal score {signal_score} is below minimum {config.MIN_SIGNAL_SCORE}"
 
     for key in ("price", "sl_price", "tp1_price", "tp2_price", "tp3_price"):
-        if to_decimal(fields.get(key), default=None) is None:
+        value = to_decimal(fields.get(key), default=None)
+        if value is None:
             return False, f"{key} is missing"
+        if value <= 0:
+            return False, f"{key} must be greater than 0"
 
     ratio = risk_reward_ratio(
         direction=str(fields["direction"]),
@@ -303,6 +323,11 @@ async def signal_is_eligible(connection, fields: dict[str, object]) -> tuple[boo
     open_trades = await trade_repository.count_open_trades(connection)
     if open_trades >= config.BINGX_LIMIT_OPENED_POSITIONS:
         return False, f"Open trades limit reached: {open_trades}/{config.BINGX_LIMIT_OPENED_POSITIONS}"
+
+    if contract_symbol:
+        existing_trade = await trade_repository.active_trade_for_symbol(connection, contract_symbol)
+        if existing_trade:
+            return False, f"Open trade already exists for {contract_symbol}: trade_id={existing_trade['id']}"
 
     if config.BINGX_MARGIN <= 0:
         return False, "BINGX_MARGIN must be greater than 0"
@@ -403,8 +428,14 @@ def calculate_volume(contract: dict[str, Any], entry_price: Decimal, leverage: i
     return volume
 
 
-async def find_exchange_position(client: BingXClient, contract_symbol: str, direction: str) -> dict[str, Any] | None:
+async def find_exchange_position(
+    client: BingXClient,
+    contract_symbol: str,
+    direction: str | None,
+) -> dict[str, Any] | None:
     positions = await client.open_positions(contract_symbol)
+    if direction is None:
+        return positions[0] if positions else None
     return find_matching_position(
         positions,
         {

@@ -171,6 +171,26 @@ async def count_open_trades(connection) -> int:
     return int(row[0] or 0)
 
 
+async def active_trade_for_symbol(connection, contract_symbol: str) -> dict[str, Any] | None:
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            f"""
+            SELECT *
+            FROM trades
+            WHERE {VALID_OPEN_TRADE_SQL}
+              AND contract_symbol=%s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (contract_symbol,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        columns = [column[0] for column in cursor.description]
+    return dict(zip(columns, row))
+
+
 async def insert_open_trade(connection, trade: dict[str, Any]) -> int:
     columns = list(trade)
     placeholders = ", ".join(["%s"] * len(columns))

@@ -12,6 +12,7 @@ BingX Autotrade listens to configured Telegram chat topics, parses Aorus trading
    - `signal_score >= MIN_SIGNAL_SCORE`;
    - risk/reward to TP3 is at least `BINGX_RISK_REWARD_RATIO`;
    - currently open trades are below `BINGX_LIMIT_OPENED_POSITIONS`;
+   - no active trade or BingX position already exists for the same symbol;
    - `BINGX_MARGIN > 0`.
 6. If eligible, the bot calculates order quantity from `BINGX_MARGIN * BINGX_LEVERAGE`, caps leverage to the contract maximum when available, and submits a BingX market order with TP3 and SL.
 7. The result is stored in the `trades` table.
