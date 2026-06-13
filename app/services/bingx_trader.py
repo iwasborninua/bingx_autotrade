@@ -46,18 +46,6 @@ async def handle_new_signal(
     tp2_price = to_decimal(fields["tp2_price"])
     tp3_price = to_decimal(fields["tp3_price"])
 
-    exchange_position = await find_exchange_position(client, contract_symbol, direction=None)
-    if exchange_position:
-        reason = f"Position already exists on BingX for {contract_symbol}"
-        await signal_repository.update_signal_status(
-            connection,
-            signal_id=signal_id,
-            status="SKIPPED",
-            skip_reason=reason,
-        )
-        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {reason}")
-        return
-
     try:
         contract = await get_contract(client, contract_symbol)
         validate_contract(contract, contract_symbol)
@@ -73,6 +61,29 @@ async def handle_new_signal(
             skip_reason=str(exc),
         )
         print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {exc}")
+        return
+
+    try:
+        exchange_position = await find_exchange_position(client, contract_symbol, direction=None)
+    except Exception as exc:
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="SKIPPED",
+            skip_reason=str(exc),
+        )
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {exc}")
+        return
+
+    if exchange_position:
+        reason = f"Position already exists on BingX for {contract_symbol}"
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="SKIPPED",
+            skip_reason=reason,
+        )
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {reason}")
         return
 
     trade_id = await trade_repository.insert_open_trade(
@@ -116,7 +127,7 @@ async def handle_new_signal(
             position_side=position_side,
             order_type=ORDER_TYPE_MARKET,
             quantity=volume,
-            client_order_id=f"sig{signal_id}",
+            client_order_id=make_client_order_id(signal_id=signal_id, trade_id=trade_id),
         )
         await asyncio.sleep(1)
         position = await find_exchange_position(client, contract_symbol, direction)
@@ -708,6 +719,11 @@ def rows_for_trade(rows: list[dict[str, Any]], trade: dict[str, Any]) -> list[di
         elif not order_id and not client_ids:
             filtered.append(row)
     return filtered or [row for row in rows if str(row.get("symbol") or "") == str(trade["contract_symbol"])]
+
+
+def make_client_order_id(*, signal_id: int, trade_id: int) -> str:
+    timestamp_suffix = int(time.time() * 1000) % 1_000_000_000_000
+    return f"sig{signal_id}tr{trade_id}x{timestamp_suffix}"
 
 
 def sum_decimal_fields(rows: list[dict[str, Any]], *keys: str) -> Decimal | None:

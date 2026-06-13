@@ -1,7 +1,7 @@
 from decimal import Decimal
 import unittest
 
-from app.services.bingx_trader import risk_reward_ratio, stop_close_reason
+from app.services.bingx_trader import make_client_order_id, risk_reward_ratio, stop_close_reason
 
 
 class RiskRewardRatioTest(unittest.TestCase):
@@ -70,6 +70,15 @@ class StopCloseReasonTest(unittest.TestCase):
             ),
             "STOP_LOSS_REACHED",
         )
+
+
+class ClientOrderIdTest(unittest.TestCase):
+    def test_client_order_id_is_short_and_not_just_signal_id(self) -> None:
+        client_order_id = make_client_order_id(signal_id=4, trade_id=3)
+
+        self.assertTrue(client_order_id.startswith("sig4tr3x"))
+        self.assertLessEqual(len(client_order_id), 40)
+        self.assertNotEqual(client_order_id, "sig4")
 
 
 if __name__ == "__main__":
