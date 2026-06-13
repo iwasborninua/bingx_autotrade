@@ -125,6 +125,7 @@ async def handle_new_signal(
             contract_symbol=contract_symbol,
             direction=direction,
             position_side=position_side,
+            quantity=position_quantity(position, default=volume),
             stop_loss_price=sl_price,
             take_profit_price=tp3_price,
         )
@@ -198,6 +199,7 @@ async def place_position_tpsl(
     contract_symbol: str,
     direction: str,
     position_side: str,
+    quantity: Decimal,
     stop_loss_price: Decimal,
     take_profit_price: Decimal,
 ) -> tuple[Any, Any]:
@@ -207,6 +209,7 @@ async def place_position_tpsl(
         side=close_side,
         position_side=position_side,
         order_type="STOP_MARKET",
+        quantity=quantity,
         stop_price=stop_loss_price,
         close_position=True,
         working_type="MARK_PRICE",
@@ -216,6 +219,7 @@ async def place_position_tpsl(
         side=close_side,
         position_side=position_side,
         order_type="TAKE_PROFIT_MARKET",
+        quantity=quantity,
         stop_price=take_profit_price,
         close_position=True,
         working_type="MARK_PRICE",
@@ -500,6 +504,15 @@ def find_matching_position(positions: list[dict[str, Any]], trade: dict[str, Any
         if position_type == target_type:
             return position
     return None
+
+
+def position_quantity(position: dict[str, Any] | None, *, default: Decimal) -> Decimal:
+    if not position:
+        return default
+    quantity = first_decimal_field(position, "availableAmt", "positionAmt", "holdVol", "quantity", "positionQty")
+    if quantity is None or quantity == 0:
+        return default
+    return abs(quantity)
 
 
 async def find_stop_plan_order_id(
