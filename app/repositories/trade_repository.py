@@ -5,6 +5,19 @@ from typing import Any
 
 OPEN_TRADE_STATUSES = ("OPENING", "OPEN")
 OPEN_TRADE_STATUS_SQL = "('OPENING', 'OPEN')"
+VALID_OPEN_TRADE_SQL = (
+    f"status IN {OPEN_TRADE_STATUS_SQL} "
+    "AND contract_symbol IS NOT NULL "
+    "AND direction IN ('BUY', 'SELL') "
+    "AND entry_price IS NOT NULL "
+    "AND current_sl_price IS NOT NULL "
+    "AND tp1_price IS NOT NULL "
+    "AND tp2_price IS NOT NULL "
+    "AND tp3_price IS NOT NULL "
+    "AND margin IS NOT NULL "
+    "AND volume IS NOT NULL"
+)
+VALID_ACTIVE_TRADE_SQL = VALID_OPEN_TRADE_SQL.replace(f"status IN {OPEN_TRADE_STATUS_SQL}", "status = 'OPEN'")
 
 
 TRADE_COLUMNS = {
@@ -152,7 +165,7 @@ async def ensure_trades_table(connection) -> None:
 async def count_open_trades(connection) -> int:
     async with connection.cursor() as cursor:
         await cursor.execute(
-            f"SELECT COUNT(*) FROM trades WHERE status IN {OPEN_TRADE_STATUS_SQL}",
+            f"SELECT COUNT(*) FROM trades WHERE {VALID_OPEN_TRADE_SQL}",
         )
         row = await cursor.fetchone()
     return int(row[0] or 0)
@@ -176,7 +189,7 @@ async def insert_open_trade(connection, trade: dict[str, Any]) -> int:
 
 async def active_trades(connection) -> list[dict[str, Any]]:
     async with connection.cursor() as cursor:
-        await cursor.execute(f"SELECT * FROM trades WHERE status IN {OPEN_TRADE_STATUS_SQL}")
+        await cursor.execute(f"SELECT * FROM trades WHERE {VALID_ACTIVE_TRADE_SQL}")
         columns = [column[0] for column in cursor.description]
         rows = await cursor.fetchall()
     return [dict(zip(columns, row)) for row in rows]

@@ -201,62 +201,83 @@ async def sync_open_trades(connection, client: BingXClient) -> None:
 
     exchange_positions = await client.open_positions()
     for trade in trades:
-        position = find_matching_position(exchange_positions, trade)
-        current_price = await current_market_price(client, trade["contract_symbol"])
-        pnl = position_pnl(position) if position else None
-        if pnl is None:
-            pnl = calculate_pnl(trade, current_price, position)
-        roi = calculate_roi(trade, pnl)
-
-        if not position:
-            reason = await infer_missing_position_reason(client, trade, current_price)
-            close_result = await closed_trade_result_from_history(client, trade, current_price)
-            close_price = close_result.get("close_price") or current_price
-            realized_pnl = close_result.get("realized_pnl")
-            if realized_pnl is None:
-                realized_pnl = pnl
-            realized_roi = calculate_roi(trade, realized_pnl)
-            await trade_repository.close_trade(
-                connection,
-                trade_id=trade["id"],
-                reason=reason,
-                raw_close_response=close_result.get("raw_history"),
-                close_price=close_price,
-                realized_roi=realized_roi,
-                realized_pnl=realized_pnl,
+        try:
+            await sync_one_open_trade(connection, client, trade, exchange_positions)
+        except Exception as exc:
+            print(
+                f"TRADE MONITOR TRADE ERROR trade_id={trade.get('id')} "
+                f"symbol={trade.get('contract_symbol')}: {exc}"
             )
-            print(f"TRADE CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} reason={reason} pnl={realized_pnl}")
-            continue
 
-        if reached_price(trade["direction"], current_price, trade["tp3_price"]):
-            close_response = await client.place_order(
-                symbol=trade["contract_symbol"],
-                side="SELL" if trade["direction"] == "BUY" else "BUY",
-                position_side=POSITION_LONG if trade["direction"] == "BUY" else POSITION_SHORT,
-                order_type=ORDER_TYPE_MARKET,
-                quantity=trade["volume"],
-            )
-            await asyncio.sleep(1)
-            close_result = await closed_trade_result_from_history(client, trade, current_price)
-            close_price = close_result.get("close_price") or current_price
-            realized_pnl = close_result.get("realized_pnl")
-            if realized_pnl is None:
-                realized_pnl = pnl
-            realized_roi = calculate_roi(trade, realized_pnl)
-            await trade_repository.close_trade(
-                connection,
-                trade_id=trade["id"],
-                reason="TP3_REACHED",
-                raw_close_response={"close_order": close_response, "history": close_result.get("raw_history")},
-                close_price=close_price,
-                realized_roi=realized_roi,
-                realized_pnl=realized_pnl,
-            )
-            print(f"TRADE CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} reason=TP3_REACHED pnl={realized_pnl}")
-            continue
 
-        await maybe_move_stop_loss(connection, client, trade, current_price, roi, pnl)
-        await trade_repository.update_trade_market(connection, trade_id=trade["id"], price=current_price, roi=roi, pnl=pnl)
+async def sync_one_open_trade(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    exchange_positions: list[dict[str, Any]],
+) -> None:
+    position = find_matching_position(exchange_positions, trade)
+    current_price = await current_market_price(client, trade["contract_symbol"])
+    pnl = position_pnl(position) if position else None
+    if pnl is None:
+        pnl = calculate_pnl(trade, current_price, position)
+    roi = calculate_roi(trade, pnl)
+
+    if not position:
+        reason = await infer_missing_position_reason(client, trade, current_price)
+        close_result = await closed_trade_result_from_history(client, trade, current_price)
+        close_price = close_result.get("close_price") or current_price
+        realized_pnl = close_result.get("realized_pnl")
+        if realized_pnl is None:
+            realized_pnl = pnl
+        realized_roi = calculate_roi(trade, realized_pnl)
+        await trade_repository.close_trade(
+            connection,
+            trade_id=trade["id"],
+            reason=reason,
+            raw_close_response=close_result.get("raw_history"),
+            close_price=close_price,
+            realized_roi=realized_roi,
+            realized_pnl=realized_pnl,
+        )
+        print(
+            f"TRADE CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} "
+            f"reason={reason} pnl={realized_pnl}"
+        )
+        return
+
+    if reached_price(trade["direction"], current_price, trade["tp3_price"]):
+        close_response = await client.place_order(
+            symbol=trade["contract_symbol"],
+            side="SELL" if trade["direction"] == "BUY" else "BUY",
+            position_side=POSITION_LONG if trade["direction"] == "BUY" else POSITION_SHORT,
+            order_type=ORDER_TYPE_MARKET,
+            quantity=trade["volume"],
+        )
+        await asyncio.sleep(1)
+        close_result = await closed_trade_result_from_history(client, trade, current_price)
+        close_price = close_result.get("close_price") or current_price
+        realized_pnl = close_result.get("realized_pnl")
+        if realized_pnl is None:
+            realized_pnl = pnl
+        realized_roi = calculate_roi(trade, realized_pnl)
+        await trade_repository.close_trade(
+            connection,
+            trade_id=trade["id"],
+            reason="TP3_REACHED",
+            raw_close_response={"close_order": close_response, "history": close_result.get("raw_history")},
+            close_price=close_price,
+            realized_roi=realized_roi,
+            realized_pnl=realized_pnl,
+        )
+        print(
+            f"TRADE CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} "
+            f"reason=TP3_REACHED pnl={realized_pnl}"
+        )
+        return
+
+    await maybe_move_stop_loss(connection, client, trade, current_price, roi, pnl)
+    await trade_repository.update_trade_market(connection, trade_id=trade["id"], price=current_price, roi=roi, pnl=pnl)
 
 
 async def signal_is_eligible(connection, fields: dict[str, object]) -> tuple[bool, str | None]:

@@ -285,6 +285,16 @@ class BingXClient:
         except ValueError:
             data = {"msg": response.text}
 
+        if not isinstance(data, dict):
+            if response.is_error:
+                raise BingXApiError(
+                    f"BingX API HTTP {response.status_code}",
+                    code=response.status_code,
+                    path=path,
+                    response={"data": data},
+                )
+            return data
+
         if response.is_error:
             raise BingXApiError(
                 data.get("msg") or data.get("message") or f"BingX API HTTP {response.status_code}",
@@ -302,7 +312,9 @@ class BingXClient:
                 response=data,
             )
 
-        return data.get("data", data)
+        if "data" in data and data["data"] is not None:
+            return data["data"]
+        return data
 
 
 def normalize_contract_symbol(symbol: str) -> str:

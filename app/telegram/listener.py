@@ -38,12 +38,14 @@ async def run_listener() -> None:
         config.TELEGRAM_API_HASH,
     )
     connection = await connect()
+    monitor_connection = await connect()
     bingx_client = BingXClient(
         BingXCredentials(config.BINGX_API, config.BINGX_SECRET),
         base_url=config.BINGX_BASE_URL,
         demo=config.BINGX_DEMO,
     )
     monitor_task = None
+    db_lock = asyncio.Lock()
 
     @client.on(events.NewMessage(chats=config.GROUP_ID))
     async def handler(event: events.NewMessage.Event) -> None:
@@ -56,32 +58,33 @@ async def run_listener() -> None:
         if topic_id not in config.TOPIC_IDS:
             return
 
-        fields = parse_signal(raw_text)
-        signal_id = await save_signal(
-            connection,
-            topic_id=topic_id,
-            message_id=message.id,
-            message_date=message.date,
-            raw_text=raw_text,
-            fields=fields,
-        )
-        if signal_id is None:
-            return
-
-        try:
-            await handle_new_signal(
+        async with db_lock:
+            fields = parse_signal(raw_text)
+            signal_id = await save_signal(
                 connection,
-                bingx_client,
-                signal_id=signal_id,
-                external_id=f"{config.GROUP_ID}:{message.id}",
+                topic_id=topic_id,
+                message_id=message.id,
+                message_date=message.date,
+                raw_text=raw_text,
                 fields=fields,
             )
-        except Exception as exc:
-            print(f"TRADE HANDLER ERROR signal_id={signal_id}: {exc}")
+            if signal_id is None:
+                return
+
+            try:
+                await handle_new_signal(
+                    connection,
+                    bingx_client,
+                    signal_id=signal_id,
+                    external_id=f"{config.GROUP_ID}:{message.id}",
+                    fields=fields,
+                )
+            except Exception as exc:
+                print(f"TRADE HANDLER ERROR signal_id={signal_id}: {exc}")
 
     try:
         await client.start(phone=config.TELEGRAM_PHONE)
-        monitor_task = asyncio.create_task(monitor_open_trades(connection, bingx_client))
+        monitor_task = asyncio.create_task(monitor_open_trades(monitor_connection, bingx_client))
         print(
             f"Listening group={config.GROUP_ID}, topics={sorted(config.TOPIC_IDS)}, "
             f"min_signal_score={config.MIN_SIGNAL_SCORE}, "
@@ -96,5 +99,6 @@ async def run_listener() -> None:
             except asyncio.CancelledError:
                 pass
         connection.close()
+        monitor_connection.close()
         await bingx_client.close()
         await client.disconnect()
