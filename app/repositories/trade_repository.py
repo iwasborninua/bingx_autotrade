@@ -222,6 +222,8 @@ async def mark_trade_open(
     bingx_order_id: str | None,
     bingx_position_id: str | None,
     stop_plan_order_id: str | None,
+    avg_entry_price: Decimal | None = None,
+    break_even_price: Decimal | None = None,
     raw_open_response: Any,
 ) -> None:
     async with connection.cursor() as cursor:
@@ -232,6 +234,8 @@ async def mark_trade_open(
                 bingx_order_id=%s,
                 bingx_position_id=%s,
                 stop_plan_order_id=%s,
+                avg_entry_price=COALESCE(%s, avg_entry_price),
+                break_even_price=COALESCE(%s, break_even_price),
                 raw_open_response=%s,
                 opened_at=CURRENT_TIMESTAMP,
                 updated_at=CURRENT_TIMESTAMP
@@ -241,6 +245,8 @@ async def mark_trade_open(
                 bingx_order_id,
                 bingx_position_id,
                 stop_plan_order_id,
+                avg_entry_price,
+                break_even_price,
                 to_json(raw_open_response),
                 trade_id,
             ),

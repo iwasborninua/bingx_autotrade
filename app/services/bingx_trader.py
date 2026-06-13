@@ -131,6 +131,7 @@ async def handle_new_signal(
         )
         await asyncio.sleep(1)
         position = await find_exchange_position(client, contract_symbol, direction)
+        actual_entry_price = actual_entry_price_from_open(position, open_response, default=entry_price)
         stop_response, take_profit_response = await place_position_tpsl(
             client,
             contract_symbol=contract_symbol,
@@ -148,6 +149,8 @@ async def handle_new_signal(
             bingx_order_id=extract_id(open_response, "orderId", "order_id"),
             bingx_position_id=extract_id(position, "positionId", "position_id", "id", "positionIdStr"),
             stop_plan_order_id=stop_plan_order_id,
+            avg_entry_price=actual_entry_price,
+            break_even_price=break_even_price(direction, actual_entry_price, fee_rate),
             raw_open_response={
                 "order": open_response,
                 "position": position,
@@ -410,7 +413,8 @@ async def maybe_move_stop_loss(
     elif trade.get("break_even_moved_at") is None and (
         reached_price(direction, current_price, trade["tp1_price"]) or (roi is not None and roi >= Decimal("100"))
     ):
-        next_stop = break_even_price(direction, trade["entry_price"], trade["fee_rate"])
+        avg_entry = to_decimal(trade.get("avg_entry_price"), default=trade["entry_price"])
+        next_stop = break_even_price(direction, avg_entry, trade["fee_rate"])
         reached_column = "break_even_moved_at"
 
     if next_stop is None or reached_column is None:
@@ -524,6 +528,26 @@ def position_quantity(position: dict[str, Any] | None, *, default: Decimal) -> D
     if quantity is None or quantity == 0:
         return default
     return abs(quantity)
+
+
+def actual_entry_price_from_open(position: dict[str, Any] | None, open_response: Any, *, default: Decimal) -> Decimal:
+    position_price = first_decimal_field(position or {}, "avgPrice", "averagePrice", "holdAvgPrice")
+    if position_price is not None and position_price > 0:
+        return position_price
+
+    if isinstance(open_response, dict):
+        order = open_response.get("order")
+        order_price = first_decimal_field(
+            order if isinstance(order, dict) else open_response,
+            "avgPrice",
+            "averagePrice",
+            "executedPrice",
+            "price",
+        )
+        if order_price is not None and order_price > 0:
+            return order_price
+
+    return default
 
 
 async def find_stop_plan_order_id(

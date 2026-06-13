@@ -2,6 +2,8 @@ from decimal import Decimal
 import unittest
 
 from app.services.bingx_trader import (
+    actual_entry_price_from_open,
+    break_even_price,
     infer_missing_position_reason_from_price,
     make_client_order_id,
     risk_reward_ratio,
@@ -107,6 +109,23 @@ class MissingPositionReasonTest(unittest.TestCase):
         )
 
         self.assertEqual(reason, "STOP_LOSS_REACHED")
+
+
+class EntryPriceTest(unittest.TestCase):
+    def test_actual_entry_price_prefers_position_avg_price(self) -> None:
+        price = actual_entry_price_from_open(
+            {"avgPrice": "0.41894"},
+            {"order": {"avgPrice": "0.41895"}},
+            default=Decimal("0.414"),
+        )
+
+        self.assertEqual(price, Decimal("0.41894"))
+
+    def test_break_even_uses_actual_average_entry(self) -> None:
+        self.assertEqual(
+            break_even_price("BUY", Decimal("0.41894"), Decimal("0.0005")),
+            Decimal("0.41935894"),
+        )
 
 
 class ClientOrderIdTest(unittest.TestCase):
