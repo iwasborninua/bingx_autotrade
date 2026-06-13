@@ -117,12 +117,18 @@ async def handle_new_signal(
             order_type=ORDER_TYPE_MARKET,
             quantity=volume,
             client_order_id=f"sig{signal_id}",
-            stop_loss_price=sl_price,
-            take_profit_price=tp3_price,
         )
         await asyncio.sleep(1)
         position = await find_exchange_position(client, contract_symbol, direction)
-        stop_plan_order_id = await find_stop_plan_order_id(client, contract_symbol, position, open_response)
+        stop_response, take_profit_response = await place_position_tpsl(
+            client,
+            contract_symbol=contract_symbol,
+            direction=direction,
+            position_side=position_side,
+            stop_loss_price=sl_price,
+            take_profit_price=tp3_price,
+        )
+        stop_plan_order_id = await find_stop_plan_order_id(client, contract_symbol, position, stop_response)
 
         await trade_repository.mark_trade_open(
             connection,
@@ -130,7 +136,12 @@ async def handle_new_signal(
             bingx_order_id=extract_id(open_response, "orderId", "order_id"),
             bingx_position_id=extract_id(position, "positionId", "position_id", "id", "positionIdStr"),
             stop_plan_order_id=stop_plan_order_id,
-            raw_open_response={"order": open_response, "position": position},
+            raw_open_response={
+                "order": open_response,
+                "position": position,
+                "stop_loss": stop_response,
+                "take_profit": take_profit_response,
+            },
         )
         await signal_repository.update_signal_status(connection, signal_id=signal_id, status="POSITION_OPENED")
         print(f"TRADE OPENED signal_id={signal_id} trade_id={trade_id} symbol={contract_symbol} volume={volume}")
@@ -179,6 +190,37 @@ async def ensure_margin_type(client: BingXClient, contract_symbol: str) -> None:
             )
             return
         raise
+
+
+async def place_position_tpsl(
+    client: BingXClient,
+    *,
+    contract_symbol: str,
+    direction: str,
+    position_side: str,
+    stop_loss_price: Decimal,
+    take_profit_price: Decimal,
+) -> tuple[Any, Any]:
+    close_side = "SELL" if direction == "BUY" else "BUY"
+    stop_response = await client.place_order(
+        symbol=contract_symbol,
+        side=close_side,
+        position_side=position_side,
+        order_type="STOP_MARKET",
+        stop_price=stop_loss_price,
+        close_position=True,
+        working_type="MARK_PRICE",
+    )
+    take_profit_response = await client.place_order(
+        symbol=contract_symbol,
+        side=close_side,
+        position_side=position_side,
+        order_type="TAKE_PROFIT_MARKET",
+        stop_price=take_profit_price,
+        close_position=True,
+        working_type="MARK_PRICE",
+    )
+    return stop_response, take_profit_response
 
 
 async def log_trade_stats(connection) -> None:

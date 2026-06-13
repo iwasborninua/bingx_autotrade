@@ -203,10 +203,13 @@ class BingXClient:
         side: str,
         position_side: str,
         order_type: str,
-        quantity: Decimal | int | float | str,
+        quantity: Decimal | int | float | str | None = None,
         price: Decimal | int | float | str | None = None,
+        stop_price: Decimal | int | float | str | None = None,
         stop_loss_price: Decimal | int | float | str | None = None,
         take_profit_price: Decimal | int | float | str | None = None,
+        close_position: bool | None = None,
+        working_type: str | None = None,
         client_order_id: str | None = None,
     ) -> Any:
         payload: dict[str, Any] = {
@@ -214,16 +217,37 @@ class BingXClient:
             "side": side.upper(),
             "positionSide": position_side.upper(),
             "type": order_type.upper(),
-            "quantity": quantity,
         }
+        if quantity is not None:
+            payload["quantity"] = quantity
         if price is not None:
             payload["price"] = price
+        if stop_price is not None:
+            payload["stopPrice"] = stop_price
+        if close_position is not None:
+            payload["closePosition"] = str(close_position).lower()
+        if working_type:
+            payload["workingType"] = working_type.upper()
         if client_order_id:
             payload["clientOrderID"] = client_order_id
         if stop_loss_price is not None:
-            payload["stopLoss"] = to_json({"type": "STOP_MARKET", "stopPrice": decimal_to_json_number(stop_loss_price)})
+            payload["stopLoss"] = to_json(
+                {
+                    "type": "STOP_MARKET",
+                    "stopPrice": decimal_to_json_number(stop_loss_price),
+                    "price": decimal_to_json_number(stop_loss_price),
+                    "workingType": "MARK_PRICE",
+                }
+            )
         if take_profit_price is not None:
-            payload["takeProfit"] = to_json({"type": "TAKE_PROFIT_MARKET", "stopPrice": decimal_to_json_number(take_profit_price)})
+            payload["takeProfit"] = to_json(
+                {
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": decimal_to_json_number(take_profit_price),
+                    "price": decimal_to_json_number(take_profit_price),
+                    "workingType": "MARK_PRICE",
+                }
+            )
         return await self._private_post("/openApi/swap/v2/trade/order", payload)
 
     async def cancel_order(self, *, symbol: str, order_id: int | str | None = None, client_order_id: str | None = None) -> Any:
