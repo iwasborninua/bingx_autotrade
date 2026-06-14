@@ -274,6 +274,7 @@ async def update_trade_stop(
     *,
     trade_id: int,
     stop_price: Decimal,
+    stop_plan_order_id: str | None = None,
     reached_column: str,
     roi: Decimal | None,
     pnl: Decimal | None = None,
@@ -287,6 +288,7 @@ async def update_trade_stop(
             f"""
             UPDATE trades
             SET current_sl_price=%s,
+                stop_plan_order_id=COALESCE(%s, stop_plan_order_id),
                 last_price=%s,
                 last_roi=%s,
                 last_pnl=%s,
@@ -294,7 +296,25 @@ async def update_trade_stop(
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=%s
             """,
-            (stop_price, price, roi, pnl, trade_id),
+            (stop_price, stop_plan_order_id, price, roi, pnl, trade_id),
+        )
+
+
+async def update_trade_stop_order_id(
+    connection,
+    *,
+    trade_id: int,
+    stop_plan_order_id: str | None,
+) -> None:
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            """
+            UPDATE trades
+            SET stop_plan_order_id=COALESCE(%s, stop_plan_order_id),
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (stop_plan_order_id, trade_id),
         )
 
 

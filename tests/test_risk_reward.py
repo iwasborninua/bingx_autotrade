@@ -4,11 +4,15 @@ import unittest
 from app.services.bingx_trader import (
     actual_entry_price_from_open,
     break_even_price,
+    extract_order_id,
     infer_missing_position_reason_from_price,
+    is_missing_order_error,
     make_client_order_id,
     risk_reward_ratio,
+    stop_order_id_from_trade,
     stop_close_reason,
 )
+from app.bingx.client import BingXApiError
 
 
 class RiskRewardRatioTest(unittest.TestCase):
@@ -126,6 +130,29 @@ class EntryPriceTest(unittest.TestCase):
             break_even_price("BUY", Decimal("0.41894"), Decimal("0.0005")),
             Decimal("0.41935894"),
         )
+
+
+class StopOrderIdTest(unittest.TestCase):
+    def test_extract_order_id_reads_nested_bingx_order_response(self) -> None:
+        self.assertEqual(
+            extract_order_id({"order": {"orderId": 123456}}),
+            "123456",
+        )
+
+    def test_stop_order_id_reads_raw_open_response(self) -> None:
+        self.assertEqual(
+            stop_order_id_from_trade(
+                {
+                    "raw_open_response": '{"stop_loss":{"order":{"orderId":987654}}}',
+                }
+            ),
+            "987654",
+        )
+
+
+class MissingOrderErrorTest(unittest.TestCase):
+    def test_order_not_exist_is_recoverable_for_stop_replacement(self) -> None:
+        self.assertTrue(is_missing_order_error(BingXApiError("order not exist", code=109400)))
 
 
 class ClientOrderIdTest(unittest.TestCase):

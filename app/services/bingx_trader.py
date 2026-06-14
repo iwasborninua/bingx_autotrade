@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -241,6 +242,36 @@ async def place_position_tpsl(
     return stop_response, take_profit_response
 
 
+async def replace_stop_loss_order(
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    stop_price: Decimal,
+) -> Any:
+    stop_order_id = stop_order_id_from_trade(trade)
+    if stop_order_id:
+        try:
+            await client.cancel_order(symbol=trade["contract_symbol"], order_id=stop_order_id)
+        except BingXApiError as exc:
+            if not is_missing_order_error(exc):
+                raise
+            print(f"TRADE WARNING trade_id={trade['id']}: old stop order {stop_order_id} was already missing")
+    else:
+        print(f"TRADE WARNING trade_id={trade['id']}: stop_plan_order_id is missing, placing new stop without cancel")
+
+    direction = trade["direction"]
+    return await client.place_order(
+        symbol=trade["contract_symbol"],
+        side="SELL" if direction == "BUY" else "BUY",
+        position_side=POSITION_LONG if direction == "BUY" else POSITION_SHORT,
+        order_type="STOP_MARKET",
+        quantity=position_quantity(position, default=to_decimal(trade["volume"])),
+        stop_price=stop_price,
+        close_position=True,
+        working_type="MARK_PRICE",
+    )
+
+
 async def log_trade_stats(connection) -> None:
     stats = await trade_repository.trade_stats(connection)
     active_pnl = to_decimal(stats.get("active_pnl"))
@@ -348,7 +379,9 @@ async def sync_one_open_trade(
         )
         return
 
-    await maybe_move_stop_loss(connection, client, trade, current_price, roi, pnl)
+    moved_stop = await maybe_move_stop_loss(connection, client, trade, position, current_price, roi, pnl)
+    if not moved_stop:
+        await maybe_sync_stop_loss_order(connection, client, trade, position)
     await trade_repository.update_trade_market(connection, trade_id=trade["id"], price=current_price, roi=roi, pnl=pnl)
 
 
@@ -399,10 +432,11 @@ async def maybe_move_stop_loss(
     connection,
     client: BingXClient,
     trade: dict[str, Any],
+    position: dict[str, Any],
     current_price: Decimal,
     roi: Decimal | None,
     pnl: Decimal | None,
-) -> None:
+) -> bool:
     direction = trade["direction"]
     next_stop = None
     reached_column = None
@@ -418,30 +452,53 @@ async def maybe_move_stop_loss(
         reached_column = "break_even_moved_at"
 
     if next_stop is None or reached_column is None:
-        return
+        return False
 
     if not improves_stop(direction, trade["current_sl_price"], next_stop):
-        return
+        return False
 
-    stop_plan_order_id = trade.get("stop_plan_order_id")
-    if stop_plan_order_id:
-        print(
-            f"TRADE WARNING trade_id={trade['id']}: BingX stop replacement is not implemented, "
-            "only DB SL is updated"
-        )
-    else:
-        print(f"TRADE WARNING trade_id={trade['id']}: stop_plan_order_id is missing, only DB SL is updated")
+    stop_response = await replace_stop_loss_order(client, trade, position, next_stop)
+    stop_plan_order_id = extract_order_id(stop_response) or stop_order_id_from_trade(trade)
 
     await trade_repository.update_trade_stop(
         connection,
         trade_id=trade["id"],
         stop_price=next_stop,
+        stop_plan_order_id=stop_plan_order_id,
         reached_column=reached_column,
         roi=roi,
         pnl=pnl,
         price=current_price,
     )
     print(f"TRADE SL MOVED trade_id={trade['id']} stop={next_stop} reason={reached_column}")
+    return True
+
+
+async def maybe_sync_stop_loss_order(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+) -> None:
+    if trade.get("stop_plan_order_id"):
+        return
+    if not stop_order_id_from_trade(trade):
+        return
+
+    direction = trade["direction"]
+    current_stop = to_decimal(trade["current_sl_price"])
+    initial_stop = to_decimal(trade.get("initial_sl_price") or trade.get("original_sl_price"), default=None)
+    if initial_stop is None or not improves_stop(direction, initial_stop, current_stop):
+        return
+
+    stop_response = await replace_stop_loss_order(client, trade, position, current_stop)
+    stop_plan_order_id = extract_order_id(stop_response)
+    await trade_repository.update_trade_stop_order_id(
+        connection,
+        trade_id=trade["id"],
+        stop_plan_order_id=stop_plan_order_id,
+    )
+    print(f"TRADE SL SYNCED trade_id={trade['id']} stop={current_stop} order_id={stop_plan_order_id}")
 
 
 async def get_contract(client: BingXClient, contract_symbol: str) -> dict[str, Any]:
@@ -559,6 +616,35 @@ async def find_stop_plan_order_id(
     response_id = extract_id(open_response, "stopPlanOrderId", "stop_plan_order_id", "stopLossOrderId")
     if response_id:
         return response_id
+    return extract_order_id(open_response)
+
+
+def stop_order_id_from_trade(trade: dict[str, Any]) -> str | None:
+    stop_plan_order_id = extract_id(trade, "stop_plan_order_id", "stopPlanOrderId", "stopLossOrderId")
+    if stop_plan_order_id:
+        return stop_plan_order_id
+
+    raw_open_response = trade.get("raw_open_response")
+    if isinstance(raw_open_response, str):
+        try:
+            raw_open_response = json.loads(raw_open_response)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(raw_open_response, dict):
+        return None
+
+    stop_loss = raw_open_response.get("stop_loss")
+    return extract_order_id(stop_loss)
+
+
+def extract_order_id(data: Any) -> str | None:
+    order_id = extract_id(data, "orderId", "orderID", "order_id")
+    if order_id:
+        return order_id
+    if isinstance(data, dict):
+        order = data.get("order")
+        if isinstance(order, dict):
+            return extract_id(order, "orderId", "orderID", "order_id")
     return None
 
 
@@ -872,6 +958,11 @@ def format_exception(exc: Exception) -> str:
         path = f" path={exc.path}" if exc.path else ""
         return f"BingX API error code={exc.code}{path}: {details}"
     return clean_error_text(str(exc))
+
+
+def is_missing_order_error(exc: BingXApiError) -> bool:
+    message = clean_error_text(str(exc)).lower()
+    return exc.code in {80016, "80016"} or "does not exist" in message or "not exist" in message
 
 
 def clean_error_text(value: str) -> str:
