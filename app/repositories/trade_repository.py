@@ -99,6 +99,37 @@ TRADE_COLUMN_TYPES = {
 }
 
 
+def stats_select(alias: str | None = None) -> str:
+    prefix = f"{alias}." if alias else ""
+    return f"""
+                COUNT(*) AS total_trades,
+                SUM({prefix}status IN ('OPENING', 'OPEN')) AS active_trades,
+                SUM({prefix}status = 'CLOSED') AS closed_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason LIKE 'TP%%') AS tp_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason LIKE '%%STOP%%' AND {prefix}close_reason NOT LIKE 'TP%%') AS sl_trades,
+                SUM(
+                    (
+                        {prefix}direction = 'BUY'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) >= {prefix}tp1_price
+                    )
+                    OR (
+                        {prefix}direction = 'SELL'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) <= {prefix}tp1_price
+                    )
+                    OR {prefix}close_reason LIKE 'TP%%'
+                ) AS reached_tp1_trades,
+                SUM({prefix}status IN ('OPENING', 'OPEN') AND {prefix}break_even_moved_at IS NOT NULL) AS active_reached_tp1_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason IN ('TP1_STOP_TRIGGERED', 'TP2_STOP_TRIGGERED')) AS be_closed_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'STOP_LOSS_REACHED') AS sl_before_tp1_trades,
+                COALESCE(SUM(CASE WHEN {prefix}status IN ('OPENING', 'OPEN') THEN {prefix}last_pnl ELSE 0 END), 0) AS active_pnl,
+                COALESCE(SUM(CASE WHEN {prefix}status IN ('OPENING', 'OPEN') THEN {prefix}margin ELSE 0 END), 0) AS active_margin,
+                COALESCE(SUM(CASE WHEN {prefix}status = 'CLOSED' THEN {prefix}realized_pnl ELSE 0 END), 0) AS closed_pnl,
+                COALESCE(SUM(CASE WHEN {prefix}status = 'CLOSED' THEN {prefix}margin ELSE 0 END), 0) AS closed_margin,
+                COALESCE(SUM(CASE WHEN {prefix}status IN ('OPENING', 'OPEN') THEN {prefix}last_pnl ELSE {prefix}realized_pnl END), 0) AS total_pnl,
+                COALESCE(SUM({prefix}margin), 0) AS total_margin
+"""
+
+
 async def ensure_trades_table(connection) -> None:
     async with connection.cursor() as cursor:
         await cursor.execute("SHOW TABLES LIKE 'trades'")
@@ -404,25 +435,33 @@ async def close_trade(
 async def trade_stats(connection) -> dict[str, Any]:
     async with connection.cursor() as cursor:
         await cursor.execute(
-            """
+            f"""
             SELECT
-                COUNT(*) AS total_trades,
-                SUM(status IN ('OPENING', 'OPEN')) AS active_trades,
-                SUM(status = 'CLOSED') AS closed_trades,
-                SUM(status = 'CLOSED' AND close_reason LIKE 'TP%%') AS tp_trades,
-                SUM(status = 'CLOSED' AND close_reason LIKE '%%STOP%%' AND close_reason NOT LIKE 'TP%%') AS sl_trades,
-                COALESCE(SUM(CASE WHEN status IN ('OPENING', 'OPEN') THEN last_pnl ELSE 0 END), 0) AS active_pnl,
-                COALESCE(SUM(CASE WHEN status IN ('OPENING', 'OPEN') THEN margin ELSE 0 END), 0) AS active_margin,
-                COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN realized_pnl ELSE 0 END), 0) AS closed_pnl,
-                COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN margin ELSE 0 END), 0) AS closed_margin,
-                COALESCE(SUM(CASE WHEN status IN ('OPENING', 'OPEN') THEN last_pnl ELSE realized_pnl END), 0) AS total_pnl,
-                COALESCE(SUM(margin), 0) AS total_margin
+{stats_select()}
             FROM trades
             """
         )
         columns = [column[0] for column in cursor.description]
         row = await cursor.fetchone()
     return dict(zip(columns, row)) if row else {}
+
+
+async def trade_stats_by_topic(connection) -> list[dict[str, Any]]:
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            f"""
+            SELECT
+                s.topic_id,
+{stats_select("t")}
+            FROM trades t
+            LEFT JOIN signals s ON s.id = t.signal_id
+            GROUP BY s.topic_id
+            ORDER BY s.topic_id
+            """
+        )
+        columns = [column[0] for column in cursor.description]
+        rows = await cursor.fetchall()
+    return [dict(zip(columns, row)) for row in rows]
 
 
 def to_db_value(value: Any) -> Any:
