@@ -105,6 +105,11 @@ def stats_select(alias: str | None = None) -> str:
                 COUNT(*) AS total_trades,
                 SUM({prefix}status IN ('OPENING', 'OPEN')) AS active_trades,
                 SUM({prefix}status = 'CLOSED') AS closed_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'TP3_REACHED') AS full_tp3_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'TP1_STOP_TRIGGERED') AS tp1_stop_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'TP2_STOP_TRIGGERED') AS tp2_stop_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'STOP_LOSS_REACHED') AS sl_before_tp1_trades,
+                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'USER_CLOSED_OR_EXCHANGE_CLOSED') AS user_closed_trades,
                 SUM({prefix}status = 'CLOSED' AND {prefix}close_reason LIKE 'TP%%') AS tp_trades,
                 SUM({prefix}status = 'CLOSED' AND {prefix}close_reason LIKE '%%STOP%%' AND {prefix}close_reason NOT LIKE 'TP%%') AS sl_trades,
                 SUM(
@@ -118,9 +123,31 @@ def stats_select(alias: str | None = None) -> str:
                     )
                     OR {prefix}close_reason LIKE 'TP%%'
                 ) AS reached_tp1_trades,
+                SUM(
+                    {prefix}tp2_reached_at IS NOT NULL
+                    OR {prefix}close_reason IN ('TP2_STOP_TRIGGERED', 'TP3_REACHED')
+                    OR (
+                        {prefix}direction = 'BUY'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) >= {prefix}tp2_price
+                    )
+                    OR (
+                        {prefix}direction = 'SELL'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) <= {prefix}tp2_price
+                    )
+                ) AS reached_tp2_trades,
+                SUM(
+                    {prefix}close_reason = 'TP3_REACHED'
+                    OR (
+                        {prefix}direction = 'BUY'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) >= {prefix}tp3_price
+                    )
+                    OR (
+                        {prefix}direction = 'SELL'
+                        AND COALESCE({prefix}close_price, {prefix}last_price) <= {prefix}tp3_price
+                    )
+                ) AS reached_tp3_trades,
                 SUM({prefix}status IN ('OPENING', 'OPEN') AND {prefix}break_even_moved_at IS NOT NULL) AS active_reached_tp1_trades,
                 SUM({prefix}status = 'CLOSED' AND {prefix}close_reason IN ('TP1_STOP_TRIGGERED', 'TP2_STOP_TRIGGERED')) AS be_closed_trades,
-                SUM({prefix}status = 'CLOSED' AND {prefix}close_reason = 'STOP_LOSS_REACHED') AS sl_before_tp1_trades,
                 COALESCE(SUM(CASE WHEN {prefix}status IN ('OPENING', 'OPEN') THEN {prefix}last_pnl ELSE 0 END), 0) AS active_pnl,
                 COALESCE(SUM(CASE WHEN {prefix}status IN ('OPENING', 'OPEN') THEN {prefix}margin ELSE 0 END), 0) AS active_margin,
                 COALESCE(SUM(CASE WHEN {prefix}status = 'CLOSED' THEN {prefix}realized_pnl ELSE 0 END), 0) AS closed_pnl,
