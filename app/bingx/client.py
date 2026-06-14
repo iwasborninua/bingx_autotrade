@@ -177,6 +177,17 @@ class BingXClient:
             ),
         )
 
+    async def open_orders(self, *, symbol: str | None = None, order_type: str | None = None) -> Any:
+        return await self._private_get(
+            "/openApi/swap/v2/trade/openOrders",
+            params=compact_dict(
+                {
+                    "symbol": normalize_contract_symbol(symbol) if symbol else None,
+                    "type": order_type,
+                }
+            ),
+        )
+
     async def set_leverage(self, *, symbol: str, side: str, leverage: int) -> Any:
         return await self._private_post(
             "/openApi/swap/v2/trade/leverage",

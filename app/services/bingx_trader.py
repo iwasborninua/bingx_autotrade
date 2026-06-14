@@ -303,9 +303,11 @@ async def sync_open_trades(connection, client: BingXClient) -> None:
         return
 
     exchange_positions = await client.open_positions()
+    exchange_open_orders = await client.open_orders()
+    open_orders = flatten_order_list(exchange_open_orders)
     for trade in trades:
         try:
-            await sync_one_open_trade(connection, client, trade, exchange_positions)
+            await sync_one_open_trade(connection, client, trade, exchange_positions, open_orders)
         except Exception as exc:
             print(
                 f"TRADE MONITOR TRADE ERROR trade_id={trade.get('id')} "
@@ -318,9 +320,12 @@ async def sync_one_open_trade(
     client: BingXClient,
     trade: dict[str, Any],
     exchange_positions: list[dict[str, Any]],
+    open_orders: list[dict[str, Any]],
 ) -> None:
     position = find_matching_position(exchange_positions, trade)
     current_price = await current_market_price(client, trade["contract_symbol"])
+    if position:
+        trade = await sync_manual_stop_loss(connection, trade, open_orders)
     pnl = position_pnl(position) if position else None
     if pnl is None:
         pnl = calculate_pnl(trade, current_price, position)
@@ -501,6 +506,62 @@ async def maybe_sync_stop_loss_order(
     print(f"TRADE SL SYNCED trade_id={trade['id']} stop={current_stop} order_id={stop_plan_order_id}")
 
 
+async def sync_manual_stop_loss(connection, trade: dict[str, Any], open_orders: list[dict[str, Any]]) -> dict[str, Any]:
+    stop_order = current_stop_loss_order(trade, open_orders)
+    if not stop_order:
+        return trade
+
+    exchange_stop = first_decimal_field(stop_order, "stopPrice", "triggerPrice")
+    stop_order_id = extract_order_id(stop_order)
+    current_stop = to_decimal(trade.get("current_sl_price"), default=None)
+    if exchange_stop is None:
+        return trade
+
+    if exchange_stop != current_stop or (stop_order_id and str(trade.get("stop_plan_order_id") or "") != stop_order_id):
+        await trade_repository.sync_trade_stop_from_exchange(
+            connection,
+            trade_id=trade["id"],
+            stop_price=exchange_stop,
+            stop_plan_order_id=stop_order_id,
+        )
+        trade = dict(trade)
+        trade["current_sl_price"] = exchange_stop
+        if stop_order_id:
+            trade["stop_plan_order_id"] = stop_order_id
+        print(f"TRADE SL EXCHANGE SYNC trade_id={trade['id']} stop={exchange_stop} order_id={stop_order_id}")
+
+    return trade
+
+
+def current_stop_loss_order(trade: dict[str, Any], open_orders: list[dict[str, Any]]) -> dict[str, Any] | None:
+    direction = trade["direction"]
+    expected_side = "SELL" if direction == "BUY" else "BUY"
+    expected_position_side = POSITION_LONG if direction == "BUY" else POSITION_SHORT
+    stop_order_id = stop_order_id_from_trade(trade)
+
+    matching_stops = []
+    for order in open_orders:
+        if str(order.get("symbol")) != str(trade["contract_symbol"]):
+            continue
+        if str(order.get("type") or "").upper() != "STOP_MARKET":
+            continue
+        if str(order.get("side") or "").upper() != expected_side:
+            continue
+        position_side = str(order.get("positionSide") or expected_position_side).upper()
+        if position_side != expected_position_side:
+            continue
+        status = str(order.get("status") or "").upper()
+        if status and status not in {"NEW", "PENDING"}:
+            continue
+        matching_stops.append(order)
+
+    if stop_order_id:
+        for order in matching_stops:
+            if extract_order_id(order) == stop_order_id:
+                return order
+    return latest_order(matching_stops)
+
+
 async def get_contract(client: BingXClient, contract_symbol: str) -> dict[str, Any]:
     contracts = await client.contracts(contract_symbol)
     for contract in contracts:
@@ -646,6 +707,12 @@ def extract_order_id(data: Any) -> str | None:
         if isinstance(order, dict):
             return extract_id(order, "orderId", "orderID", "order_id")
     return None
+
+
+def latest_order(orders: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not orders:
+        return None
+    return max(orders, key=lambda order: int(order.get("updateTime") or order.get("time") or 0))
 
 
 async def current_market_price(client: BingXClient, contract_symbol: str) -> Decimal:

@@ -318,6 +318,26 @@ async def update_trade_stop_order_id(
         )
 
 
+async def sync_trade_stop_from_exchange(
+    connection,
+    *,
+    trade_id: int,
+    stop_price: Decimal,
+    stop_plan_order_id: str | None,
+) -> None:
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            """
+            UPDATE trades
+            SET current_sl_price=%s,
+                stop_plan_order_id=COALESCE(%s, stop_plan_order_id),
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (stop_price, stop_plan_order_id, trade_id),
+        )
+
+
 async def update_trade_market(
     connection,
     *,

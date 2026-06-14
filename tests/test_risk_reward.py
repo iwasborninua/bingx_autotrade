@@ -4,9 +4,11 @@ import unittest
 from app.services.bingx_trader import (
     actual_entry_price_from_open,
     break_even_price,
+    current_stop_loss_order,
     extract_order_id,
     infer_missing_position_reason_from_price,
     is_missing_order_error,
+    latest_order,
     make_client_order_id,
     risk_reward_ratio,
     stop_order_id_from_trade,
@@ -148,6 +150,25 @@ class StopOrderIdTest(unittest.TestCase):
             ),
             "987654",
         )
+
+
+class OrderSelectionTest(unittest.TestCase):
+    def test_latest_order_prefers_highest_update_time(self) -> None:
+        self.assertEqual(
+            latest_order([{"orderId": 1, "updateTime": 10}, {"orderId": 2, "updateTime": 20}])["orderId"],
+            2,
+        )
+
+    def test_current_stop_loss_order_filters_shared_open_orders(self) -> None:
+        order = current_stop_loss_order(
+            {"contract_symbol": "BTC-USDT", "direction": "BUY", "stop_plan_order_id": None},
+            [
+                {"symbol": "ETH-USDT", "side": "SELL", "positionSide": "LONG", "type": "STOP_MARKET", "orderId": 1},
+                {"symbol": "BTC-USDT", "side": "SELL", "positionSide": "LONG", "type": "STOP_MARKET", "orderId": 2},
+            ],
+        )
+
+        self.assertEqual(order["orderId"], 2)
 
 
 class MissingOrderErrorTest(unittest.TestCase):
