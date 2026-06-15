@@ -80,6 +80,10 @@ class BingXClient:
     async def price(self, symbol: str) -> dict[str, Any]:
         return await self._public_get("/openApi/swap/v2/quote/price", params={"symbol": normalize_contract_symbol(symbol)})
 
+    async def prices(self) -> list[dict[str, Any]]:
+        data = await self._public_get("/openApi/swap/v2/quote/price")
+        return data if isinstance(data, list) else []
+
     async def account_balance(self, asset: str = "USDT") -> Any:
         return await self._private_get("/openApi/swap/v2/user/balance", params={"asset": asset.upper()})
 

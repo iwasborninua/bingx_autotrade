@@ -56,8 +56,18 @@ def print_stats_block(title: str, data: dict[str, Any]) -> None:
 
     print(title)
     print(f"Total Trades : {int(data.get('total_trades') or 0)}")
-    print(f"Active       : {int(data.get('active_trades') or 0)} | PnL {money(active_pnl)} | ROI {pct(percent(active_pnl, active_margin))}")
-    print(f"Closed       : {int(data.get('closed_trades') or 0)} | PnL {money(closed_pnl)} | ROI {pct(percent(closed_pnl, closed_margin))}")
+    print(
+        f"Active       : {int(data.get('active_trades') or 0)} | "
+        f"Margin {money(active_margin)} | "
+        f"PnL {money(active_pnl)} | "
+        f"ROI {pct(percent(active_pnl, active_margin))}"
+    )
+    print(
+        f"Closed       : {int(data.get('closed_trades') or 0)} | "
+        f"Margin {money(closed_margin)} | "
+        f"PnL {money(closed_pnl)} | "
+        f"ROI {pct(percent(closed_pnl, closed_margin))}"
+    )
     print(f"Reached TP1  : {int(data.get('reached_tp1_trades') or 0)}")
     print(f"Reached TP2  : {int(data.get('reached_tp2_trades') or 0)}")
     print(f"Reached TP3  : {int(data.get('reached_tp3_trades') or 0)}")
@@ -68,7 +78,11 @@ def print_stats_block(title: str, data: dict[str, Any]) -> None:
     print(f"SL before TP1: {int(data.get('sl_before_tp1_trades') or 0)}")
     print(f"User closed  : {int(data.get('user_closed_trades') or 0)}")
     print(f"Active in TP1: {int(data.get('active_reached_tp1_trades') or 0)}")
-    print(f"All Trades   : PnL {money(total_pnl)} | ROI {pct(percent(total_pnl, total_margin))}")
+    print(
+        f"All Trades   : Margin {money(total_margin)} | "
+        f"PnL {money(total_pnl)} | "
+        f"ROI {pct(percent(total_pnl, total_margin))}"
+    )
 
 
 if __name__ == "__main__":
