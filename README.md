@@ -8,15 +8,16 @@ BingX Autotrade listens to configured Telegram chat topics, parses Aorus trading
 2. The listener accepts messages only from `GROUP_ID` and configured topics: `TOPIC_BOT_1`, `TOPIC_BOT_2`.
 3. `signal_parser` extracts `symbol`, `direction`, `price`, `sl`, `tp1`, `tp2`, `tp3`, `signal_score`, and market fields.
 4. The parsed signal is inserted into the `signals` table.
-5. `bingx_trader` checks:
+5. Once per UTC day, after the first new signal, the listener saves the latest Alternative.me Crypto Fear & Greed Index into `fear_greed_index`.
+6. `bingx_trader` checks:
    - `signal_score >= MIN_SIGNAL_SCORE`;
    - risk/reward to TP3 is at least `BINGX_RISK_REWARD_RATIO`;
    - currently open trades are below `BINGX_LIMIT_OPENED_POSITIONS`;
    - no active trade or BingX position already exists for the same symbol;
    - `BINGX_MARGIN > 0`.
-6. If eligible, the bot calculates order quantity from `BINGX_MARGIN * BINGX_LEVERAGE`, caps leverage to the contract maximum when available, and submits a BingX market order with TP3 and SL.
-7. The result is stored in the `trades` table.
-8. A background monitor checks open trades every `BINGX_POSITION_CHECK_INTERVAL_SECONDS` seconds:
+7. If eligible, the bot calculates order quantity from `BINGX_MARGIN * BINGX_LEVERAGE`, caps leverage to the contract maximum when available, and submits a BingX market order with TP3 and SL.
+8. The result is stored in the `trades` table.
+9. A background monitor checks open trades every `BINGX_POSITION_CHECK_INTERVAL_SECONDS` seconds:
    - TP1 or ROI `>= 100%`: move DB stop to break-even including fees;
    - TP2: move DB stop to TP1 including fees;
    - TP3: close the position and mark the trade closed;
@@ -122,6 +123,16 @@ Print current trade counters, active unrealized PnL/ROI, closed realized PnL/ROI
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.stats
+```
+
+## Fear & Greed Index
+
+The listener stores the latest Alternative.me Crypto Fear & Greed Index in `fear_greed_index` once per UTC day, triggered by the first newly saved Telegram signal of that day. It is not a separate scheduled command, and a fetch failure logs `FEAR_GREED WARNING` without blocking trade handling.
+
+To backfill historical values from the first recorded bot trade date:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.fear_greed_backfill
 ```
 
 ## Environment Variables

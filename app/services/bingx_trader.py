@@ -27,9 +27,9 @@ async def handle_new_signal(
 ) -> None:
     await trade_repository.ensure_trades_table(connection)
     symbol = str(fields.get("symbol") or "UNKNOWN")
-    contract_symbol = normalize_contract_symbol(symbol) if symbol != "UNKNOWN" else "UNKNOWN"
+    requested_contract_symbol = normalize_contract_symbol(symbol) if symbol != "UNKNOWN" else "UNKNOWN"
 
-    eligible, reason = await signal_is_eligible(connection, fields, contract_symbol=contract_symbol)
+    eligible, reason = await signal_is_eligible(connection, fields)
     if not eligible:
         await signal_repository.update_signal_status(
             connection,
@@ -37,7 +37,7 @@ async def handle_new_signal(
             status="SKIPPED",
             skip_reason=reason,
         )
-        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {reason}")
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={requested_contract_symbol}: {reason}")
         return
 
     direction = str(fields["direction"])
@@ -48,7 +48,10 @@ async def handle_new_signal(
     tp3_price = to_decimal(fields["tp3_price"])
 
     try:
-        contract = await get_contract(client, contract_symbol)
+        contract = await get_contract(client, requested_contract_symbol)
+        contract_symbol = str(contract.get("symbol") or requested_contract_symbol)
+        if contract_symbol != requested_contract_symbol:
+            print(f"TRADE SYMBOL RESOLVED signal_id={signal_id}: {requested_contract_symbol} -> {contract_symbol}")
         validate_contract(contract, contract_symbol)
         leverage = bounded_leverage(contract)
         volume = calculate_volume(contract, entry_price, leverage)
@@ -62,6 +65,17 @@ async def handle_new_signal(
             skip_reason=str(exc),
         )
         print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {exc}")
+        return
+
+    eligible, reason = await signal_is_eligible(connection, fields, contract_symbol=contract_symbol)
+    if not eligible:
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="SKIPPED",
+            skip_reason=reason,
+        )
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={contract_symbol}: {reason}")
         return
 
     try:
@@ -563,13 +577,39 @@ def current_stop_loss_order(trade: dict[str, Any], open_orders: list[dict[str, A
 
 
 async def get_contract(client: BingXClient, contract_symbol: str) -> dict[str, Any]:
-    contracts = await client.contracts(contract_symbol)
+    try:
+        contracts = await client.contracts(contract_symbol)
+    except BingXApiError as exc:
+        if not is_missing_order_error(exc):
+            raise
+        contracts = await client.contracts()
+
     for contract in contracts:
         if str(contract.get("symbol")) == contract_symbol:
             return contract
+
+    for contract in contracts:
+        if contract_matches_requested_symbol(contract, contract_symbol):
+            return contract
+
     if contracts:
         return contracts[0]
     raise ValueError(f"Contract {contract_symbol} was not found")
+
+
+def contract_matches_requested_symbol(contract: dict[str, Any], requested_symbol: str) -> bool:
+    requested = requested_symbol.upper().replace("_", "-")
+    requested_asset = requested.removesuffix("-USDT")
+    contract_symbol = str(contract.get("symbol") or "").upper()
+    display_name = str(contract.get("displayName") or "").upper()
+    asset = str(contract.get("asset") or "").upper()
+
+    return (
+        display_name == requested
+        or contract_symbol == requested
+        or asset == requested_asset
+        or asset.startswith(requested_asset)
+    )
 
 
 def validate_contract(contract: dict[str, Any], contract_symbol: str) -> None:

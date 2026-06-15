@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
 
 
-load_dotenv(ENV_PATH)
+load_dotenv(ENV_PATH, override=True)
 
 
 def require_env(name: str) -> str:
@@ -38,11 +38,8 @@ TELEGRAM_API_HASH = require_env("TELEGRAM_API_HASH")
 TELEGRAM_PHONE = require_env("TELEGRAM_PHONE")
 TELEGRAM_SESSION_NAME = require_env("TELEGRAM_SESSION_NAME")
 GROUP_ID = int(require_env("GROUP_ID"))
-TOPIC_IDS = {
-    int(value)
-    for value in (os.getenv("TOPIC_BOT_1"), os.getenv("TOPIC_BOT_2"))
-    if value
-}
+TOPIC_BOT_1 = int(require_env("TOPIC_BOT_1"))
+TOPIC_IDS = {TOPIC_BOT_1}
 
 MIN_SIGNAL_SCORE = optional_decimal("MIN_SIGNAL_SCORE", "0")
 BINGX_MODE = os.getenv("BINGX_MODE", "live").strip().lower()

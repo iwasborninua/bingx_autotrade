@@ -13,6 +13,7 @@ from app.bingx.client import BingXClient, BingXCredentials
 from app.parser.signal_parser import parse_signal
 from app.repositories.signal_repository import save_signal
 from app.services.bingx_trader import handle_new_signal, monitor_open_trades
+from app.services.fear_greed_service import sync_daily_fear_greed_index
 
 
 warnings.filterwarnings(
@@ -32,25 +33,19 @@ class SingleInstanceLock:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._file = None
+        self._fd: int | None = None
 
     def __enter__(self) -> "SingleInstanceLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self.path.open("a+", encoding="utf-8")
         try:
-            if os.name == "nt":
-                self._lock_windows()
+            self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if self._remove_stale_lock():
+                self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             else:
-                self._lock_posix()
-        except Exception:
-            self._file.close()
-            self._file = None
-            raise
+                raise self._in_use_error()
 
-        self._file.seek(0)
-        self._file.truncate()
-        self._file.write(str(os.getpid()))
-        self._file.flush()
+        os.write(self._fd, str(os.getpid()).encode("ascii"))
         return self
 
     def __exit__(
@@ -59,50 +54,44 @@ class SingleInstanceLock:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if not self._file:
+        if self._fd is None:
             return
 
         try:
-            self._file.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            os.close(self._fd)
         finally:
-            self._file.close()
-            self._file = None
+            self._fd = None
             try:
                 self.path.unlink()
             except FileNotFoundError:
                 pass
 
-    def _lock_windows(self) -> None:
-        import msvcrt
-
-        assert self._file is not None
-        self._file.seek(0)
+    def _remove_stale_lock(self) -> bool:
         try:
-            msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError as exc:
-            raise self._in_use_error() from exc
+            pid = int(self.path.read_text(encoding="utf-8").strip())
+        except (FileNotFoundError, OSError, ValueError):
+            pid = 0
 
-    def _lock_posix(self) -> None:
-        import fcntl
-
-        assert self._file is not None
         try:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise self._in_use_error() from exc
+            if pid > 0:
+                os.kill(pid, 0)
+                return False
+        except OSError:
+            pass
+
+        try:
+            self.path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
 
     def _in_use_error(self) -> SessionAlreadyInUseError:
-        assert self._file is not None
-        self._file.seek(0)
-        pid = self._file.read().strip()
+        try:
+            pid = self.path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pid = ""
         owner = f" by process {pid}" if pid else ""
         return SessionAlreadyInUseError(
             f"Telegram session is already in use{owner}. "
@@ -169,6 +158,11 @@ async def run_listener() -> None:
                     )
                     if signal_id is None:
                         return
+
+                    try:
+                        await sync_daily_fear_greed_index(connection)
+                    except Exception as exc:
+                        print(f"FEAR_GREED WARNING: {exc}")
 
                     try:
                         await handle_new_signal(
