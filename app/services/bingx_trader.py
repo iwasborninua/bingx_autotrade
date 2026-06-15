@@ -81,7 +81,23 @@ async def handle_new_signal(
         return
 
     try:
-        exchange_position = await find_exchange_position(client, contract_symbol, direction=None)
+        exchange_positions = await client.open_positions()
+        open_position_count = count_open_exchange_positions(exchange_positions)
+        if open_position_count >= config.BINGX_LIMIT_OPENED_POSITIONS:
+            raise ValueError(
+                f"Exchange open positions limit reached: "
+                f"{open_position_count}/{config.BINGX_LIMIT_OPENED_POSITIONS}"
+            )
+
+        exchange_open_orders = await client.open_orders()
+        protective_order_count = count_protective_orders(flatten_order_list(exchange_open_orders))
+        if protective_order_count + 2 > config.BINGX_MAX_PROTECTIVE_ORDERS:
+            raise ValueError(
+                f"Protective TP/SL order limit reached: "
+                f"{protective_order_count}/{config.BINGX_MAX_PROTECTIVE_ORDERS}"
+            )
+
+        exchange_position = find_exchange_position_by_symbol(exchange_positions, contract_symbol)
     except Exception as exc:
         await signal_repository.update_signal_status(
             connection,
@@ -130,8 +146,11 @@ async def handle_new_signal(
         },
     )
 
+    open_response = None
+    position = None
+    position_side = POSITION_LONG if direction == "BUY" else POSITION_SHORT
+
     try:
-        position_side = POSITION_LONG if direction == "BUY" else POSITION_SHORT
         await ensure_margin_type(client, contract_symbol)
         await client.set_leverage(
             leverage=leverage,
@@ -180,6 +199,24 @@ async def handle_new_signal(
         print(f"TRADE OPENED signal_id={signal_id} trade_id={trade_id} symbol={contract_symbol} volume={volume}")
     except Exception as exc:
         reason = format_exception(exc)
+        if open_response is not None:
+            await handle_opened_position_without_tpsl(
+                connection,
+                client,
+                trade_id=trade_id,
+                signal_id=signal_id,
+                contract_symbol=contract_symbol,
+                direction=direction,
+                position_side=position_side,
+                volume=volume,
+                entry_price=entry_price,
+                fee_rate=fee_rate,
+                open_response=open_response,
+                position=position,
+                error_reason=reason,
+            )
+            return
+
         await trade_repository.mark_trade_open_failed(
             connection,
             trade_id=trade_id,
@@ -193,6 +230,110 @@ async def handle_new_signal(
             skip_reason=reason,
         )
         print(f"TRADE OPEN FAILED signal_id={signal_id} trade_id={trade_id}: {reason}")
+
+
+async def handle_opened_position_without_tpsl(
+    connection,
+    client: BingXClient,
+    *,
+    trade_id: int,
+    signal_id: int,
+    contract_symbol: str,
+    direction: str,
+    position_side: str,
+    volume: Decimal,
+    entry_price: Decimal,
+    fee_rate: Decimal,
+    open_response: Any,
+    position: dict[str, Any] | None,
+    error_reason: str,
+) -> None:
+    if position is None:
+        position = await find_exchange_position(client, contract_symbol, direction)
+
+    close_response = None
+    close_error = None
+    try:
+        if position is not None:
+            close_response = await close_unprotected_position(
+                client,
+                contract_symbol=contract_symbol,
+                direction=direction,
+                position_side=position_side,
+                quantity=position_quantity(position, default=volume),
+            )
+    except Exception as exc:
+        close_error = format_exception(exc)
+
+    actual_entry_price = actual_entry_price_from_open(position, open_response, default=entry_price)
+    raw_response = {
+        "order": open_response,
+        "position": position,
+        "tpsl_error": error_reason,
+        "emergency_close": close_response,
+        "emergency_close_error": close_error,
+    }
+
+    if close_response is not None:
+        await trade_repository.close_trade(
+            connection,
+            trade_id=trade_id,
+            reason="TP_SL_SETUP_FAILED_EMERGENCY_CLOSED",
+            raw_close_response=raw_response,
+            close_price=actual_entry_price,
+            realized_roi=None,
+            realized_pnl=None,
+        )
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="FAILED",
+            skip_reason=error_reason,
+        )
+        print(
+            f"TRADE EMERGENCY CLOSED signal_id={signal_id} trade_id={trade_id} "
+            f"symbol={contract_symbol}: TP/SL setup failed: {error_reason}"
+        )
+        return
+
+    await trade_repository.mark_trade_open(
+        connection,
+        trade_id=trade_id,
+        bingx_order_id=extract_id(open_response, "orderId", "order_id"),
+        bingx_position_id=extract_id(position, "positionId", "position_id", "id", "positionIdStr"),
+        stop_plan_order_id=None,
+        avg_entry_price=actual_entry_price,
+        margin=actual_margin_from_position(position),
+        break_even_price=break_even_price(direction, actual_entry_price, fee_rate),
+        raw_open_response=raw_response,
+    )
+    await signal_repository.update_signal_status(
+        connection,
+        signal_id=signal_id,
+        status="POSITION_OPENED",
+        skip_reason=f"TP/SL setup failed: {error_reason}",
+    )
+    print(
+        f"TRADE CRITICAL UNPROTECTED signal_id={signal_id} trade_id={trade_id} "
+        f"symbol={contract_symbol}: TP/SL setup failed and emergency close failed: {close_error or 'no position found'}"
+    )
+
+
+async def close_unprotected_position(
+    client: BingXClient,
+    *,
+    contract_symbol: str,
+    direction: str,
+    position_side: str,
+    quantity: Decimal,
+) -> Any:
+    return await client.place_order(
+        symbol=contract_symbol,
+        side="SELL" if direction == "BUY" else "BUY",
+        position_side=position_side,
+        order_type=ORDER_TYPE_MARKET,
+        quantity=quantity,
+    )
 
 
 async def monitor_open_trades(connection, client: BingXClient) -> None:
@@ -590,6 +731,28 @@ def current_stop_loss_order(trade: dict[str, Any], open_orders: list[dict[str, A
             if extract_order_id(order) == stop_order_id:
                 return order
     return latest_order(matching_stops)
+
+
+def count_open_exchange_positions(positions: list[dict[str, Any]]) -> int:
+    return sum(1 for position in positions if position_quantity(position, default=Decimal("0")) > 0)
+
+
+def count_protective_orders(open_orders: list[dict[str, Any]]) -> int:
+    protective_types = {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
+    count = 0
+    for order in open_orders:
+        order_type = str(order.get("type") or "").upper()
+        status = str(order.get("status") or "").upper()
+        if order_type in protective_types and (not status or status in {"NEW", "PENDING"}):
+            count += 1
+    return count
+
+
+def find_exchange_position_by_symbol(positions: list[dict[str, Any]], contract_symbol: str) -> dict[str, Any] | None:
+    for position in positions:
+        if str(position.get("symbol")) == contract_symbol and position_quantity(position, default=Decimal("0")) > 0:
+            return position
+    return None
 
 
 async def get_contract(client: BingXClient, contract_symbol: str) -> dict[str, Any]:
