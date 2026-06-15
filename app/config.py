@@ -39,7 +39,8 @@ TELEGRAM_PHONE = require_env("TELEGRAM_PHONE")
 TELEGRAM_SESSION_NAME = require_env("TELEGRAM_SESSION_NAME")
 GROUP_ID = int(require_env("GROUP_ID"))
 TOPIC_BOT_1 = int(require_env("TOPIC_BOT_1"))
-TOPIC_IDS = {TOPIC_BOT_1}
+TOPIC_BOT_2 = int(require_env("TOPIC_BOT_2"))
+TOPIC_IDS = {TOPIC_BOT_1, TOPIC_BOT_2}
 
 MIN_SIGNAL_SCORE = optional_decimal("MIN_SIGNAL_SCORE", "0")
 BINGX_MODE = os.getenv("BINGX_MODE", "live").strip().lower()

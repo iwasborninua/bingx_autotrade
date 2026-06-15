@@ -53,8 +53,10 @@ async def handle_new_signal(
         if contract_symbol != requested_contract_symbol:
             print(f"TRADE SYMBOL RESOLVED signal_id={signal_id}: {requested_contract_symbol} -> {contract_symbol}")
         validate_contract(contract, contract_symbol)
+        market_price = await current_market_price(client, contract_symbol)
+        validate_signal_price_matches_market(entry_price, market_price, contract_symbol)
         leverage = bounded_leverage(contract)
-        volume = calculate_volume(contract, entry_price, leverage)
+        volume = calculate_volume(contract, market_price, leverage)
         contract_size = to_decimal(contract.get("contractSize"), default=Decimal("1"))
         fee_rate = to_decimal(contract.get("takerFeeRate"), default=Decimal("0"))
     except Exception as exc:
@@ -649,6 +651,18 @@ def calculate_volume(contract: dict[str, Any], entry_price: Decimal, leverage: i
     if max_vol is not None and volume > max_vol:
         volume = floor_to_unit(max_vol, vol_unit)
     return volume
+
+
+def validate_signal_price_matches_market(entry_price: Decimal, market_price: Decimal, contract_symbol: str) -> None:
+    if entry_price <= 0 or market_price <= 0:
+        raise ValueError(f"Invalid price for {contract_symbol}: signal={entry_price}, market={market_price}")
+
+    deviation = abs(market_price - entry_price) / entry_price
+    if deviation > Decimal("0.50"):
+        raise ValueError(
+            f"Signal price is too far from {contract_symbol} market price: "
+            f"signal={entry_price}, market={market_price}, deviation={deviation:.2%}"
+        )
 
 
 async def find_exchange_position(
