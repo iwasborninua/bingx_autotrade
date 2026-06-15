@@ -588,27 +588,31 @@ async def get_contract(client: BingXClient, contract_symbol: str) -> dict[str, A
         if str(contract.get("symbol")) == contract_symbol:
             return contract
 
-    for contract in contracts:
-        if contract_matches_requested_symbol(contract, contract_symbol):
-            return contract
+    matches = [contract for contract in contracts if contract_matches_requested_symbol(contract, contract_symbol)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        symbols = ", ".join(str(contract.get("symbol")) for contract in matches[:5])
+        raise ValueError(f"Contract {contract_symbol} is ambiguous: {symbols}")
 
-    if contracts:
-        return contracts[0]
     raise ValueError(f"Contract {contract_symbol} was not found")
 
 
 def contract_matches_requested_symbol(contract: dict[str, Any], requested_symbol: str) -> bool:
     requested = requested_symbol.upper().replace("_", "-")
+    requested_compact = requested.replace("-", "")
     requested_asset = requested.removesuffix("-USDT")
     contract_symbol = str(contract.get("symbol") or "").upper()
     display_name = str(contract.get("displayName") or "").upper()
+    display_compact = display_name.replace("-", "")
     asset = str(contract.get("asset") or "").upper()
 
     return (
         display_name == requested
+        or display_compact == requested_compact
         or contract_symbol == requested
         or asset == requested_asset
-        or asset.startswith(requested_asset)
+        or (len(requested_asset) >= 5 and asset.startswith(requested_asset))
     )
 
 
