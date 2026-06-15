@@ -281,6 +281,7 @@ async def mark_trade_open(
     bingx_position_id: str | None,
     stop_plan_order_id: str | None,
     avg_entry_price: Decimal | None = None,
+    margin: Decimal | None = None,
     break_even_price: Decimal | None = None,
     raw_open_response: Any,
 ) -> None:
@@ -293,6 +294,7 @@ async def mark_trade_open(
                 bingx_position_id=%s,
                 stop_plan_order_id=%s,
                 avg_entry_price=COALESCE(%s, avg_entry_price),
+                margin=COALESCE(%s, margin),
                 break_even_price=COALESCE(%s, break_even_price),
                 raw_open_response=%s,
                 opened_at=CURRENT_TIMESTAMP,
@@ -304,6 +306,7 @@ async def mark_trade_open(
                 bingx_position_id,
                 stop_plan_order_id,
                 avg_entry_price,
+                margin,
                 break_even_price,
                 to_json(raw_open_response),
                 trade_id,
@@ -403,6 +406,7 @@ async def update_trade_market(
     price: Decimal | None,
     roi: Decimal | None,
     pnl: Decimal | None,
+    margin: Decimal | None = None,
 ) -> None:
     async with connection.cursor() as cursor:
         await cursor.execute(
@@ -411,10 +415,11 @@ async def update_trade_market(
             SET last_price=%s,
                 last_roi=%s,
                 last_pnl=%s,
+                margin=COALESCE(%s, margin),
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=%s
             """,
-            (price, roi, pnl, trade_id),
+            (price, roi, pnl, margin, trade_id),
         )
 
 

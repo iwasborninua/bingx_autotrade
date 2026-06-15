@@ -167,6 +167,7 @@ async def handle_new_signal(
             bingx_position_id=extract_id(position, "positionId", "position_id", "id", "positionIdStr"),
             stop_plan_order_id=stop_plan_order_id,
             avg_entry_price=actual_entry_price,
+            margin=actual_margin_from_position(position),
             break_even_price=break_even_price(direction, actual_entry_price, fee_rate),
             raw_open_response={
                 "order": open_response,
@@ -342,6 +343,12 @@ async def sync_one_open_trade(
     current_price = await current_market_price(client, trade["contract_symbol"])
     if position:
         trade = await sync_manual_stop_loss(connection, trade, open_orders)
+        actual_margin = actual_margin_from_position(position)
+        if actual_margin is not None:
+            trade = dict(trade)
+            trade["margin"] = actual_margin
+    else:
+        actual_margin = None
     pnl = position_pnl(position) if position else None
     if pnl is None:
         pnl = calculate_pnl(trade, current_price, position)
@@ -403,7 +410,14 @@ async def sync_one_open_trade(
     moved_stop = await maybe_move_stop_loss(connection, client, trade, position, current_price, roi, pnl)
     if not moved_stop:
         await maybe_sync_stop_loss_order(connection, client, trade, position)
-    await trade_repository.update_trade_market(connection, trade_id=trade["id"], price=current_price, roi=roi, pnl=pnl)
+    await trade_repository.update_trade_market(
+        connection,
+        trade_id=trade["id"],
+        price=current_price,
+        roi=roi,
+        pnl=pnl,
+        margin=actual_margin,
+    )
 
 
 async def signal_is_eligible(
@@ -724,6 +738,11 @@ def actual_entry_price_from_open(position: dict[str, Any] | None, open_response:
             return order_price
 
     return default
+
+
+def actual_margin_from_position(position: dict[str, Any] | None) -> Decimal | None:
+    margin = first_decimal_field(position or {}, "initialMargin", "margin")
+    return margin if margin is not None and margin > 0 else None
 
 
 async def find_stop_plan_order_id(
