@@ -11,7 +11,7 @@ from app import config
 from app.db import connect
 from app.bingx.client import BingXClient, BingXCredentials
 from app.parser.signal_parser import parse_signal
-from app.repositories.signal_repository import save_signal
+from app.repositories.signal_repository import save_signal, update_signal_status
 from app.services.bingx_trader import handle_new_signal, monitor_open_trades
 from app.services.fear_greed_service import sync_daily_fear_greed_index
 
@@ -164,6 +164,17 @@ async def run_listener() -> None:
                     except Exception as exc:
                         print(f"FEAR_GREED WARNING: {exc}")
 
+                    if not config.TOPIC_TRADE_ENABLED.get(topic_id, False):
+                        reason = f"Autotrade is disabled for topic {topic_id}"
+                        await update_signal_status(
+                            connection,
+                            signal_id=signal_id,
+                            status="SKIPPED",
+                            skip_reason=reason,
+                        )
+                        print(f"TRADE SKIP signal_id={signal_id} topic={topic_id}: {reason}")
+                        return
+
                     try:
                         await handle_new_signal(
                             connection,
@@ -179,6 +190,7 @@ async def run_listener() -> None:
             monitor_task = asyncio.create_task(monitor_open_trades(monitor_connection, bingx_client))
             print(
                 f"Listening group={config.GROUP_ID}, topics={sorted(config.TOPIC_IDS)}, "
+                f"trade_topics={[topic for topic, enabled in config.TOPIC_TRADE_ENABLED.items() if enabled]}, "
                 f"min_signal_score={config.MIN_SIGNAL_SCORE}, "
                 f"bingx_mode={config.BINGX_MODE}, bingx_base_url={config.BINGX_BASE_URL}"
             )
