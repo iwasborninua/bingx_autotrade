@@ -802,6 +802,35 @@ def validate_contract(contract: dict[str, Any], contract_symbol: str) -> None:
     status = str(contract.get("status") or contract.get("state") or "TRADING").upper()
     if status not in {"TRADING", "ONLINE", "0", "1"}:
         raise ValueError(f"Contract {contract_symbol} is not enabled")
+    validate_crypto_only_contract(contract, contract_symbol)
+
+
+def validate_crypto_only_contract(contract: dict[str, Any], contract_symbol: str) -> None:
+    asset = str(contract.get("asset") or "").upper()
+    display_asset = display_base_asset(contract)
+
+    for prefix in config.BINGX_EXCLUDED_CONTRACT_PREFIXES:
+        if contract_symbol.upper().startswith(prefix) or asset.startswith(prefix):
+            raise ValueError(
+                f"Contract {contract_symbol} is not crypto-only "
+                f"(asset={asset}, display={display_asset})"
+            )
+
+    if display_asset in config.BINGX_EXCLUDED_DISPLAY_ASSETS:
+        raise ValueError(
+            f"Contract {contract_symbol} is not crypto-only "
+            f"(asset={asset}, display={display_asset})"
+        )
+
+
+def display_base_asset(contract: dict[str, Any]) -> str:
+    display_name = str(contract.get("displayName") or contract.get("symbol") or "").upper().strip()
+    display_name = display_name.replace(" ", "")
+    if "-" in display_name:
+        display_name = display_name.split("-", 1)[0]
+    if "(" in display_name:
+        display_name = display_name.split("(", 1)[0]
+    return display_name
 
 
 def bounded_leverage(contract: dict[str, Any]) -> int:
