@@ -84,6 +84,29 @@ class BingXClient:
         data = await self._public_get("/openApi/swap/v2/quote/price")
         return data if isinstance(data, list) else []
 
+    async def klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        data = await self._public_get(
+            "/openApi/swap/v3/quote/klines",
+            params=compact_dict(
+                {
+                    "symbol": normalize_contract_symbol(symbol),
+                    "interval": interval,
+                    "startTime": start_time,
+                    "endTime": end_time,
+                    "limit": limit,
+                }
+            ),
+        )
+        return data if isinstance(data, list) else []
+
     async def account_balance(self, asset: str = "USDT") -> Any:
         return await self._private_get("/openApi/swap/v2/user/balance", params={"asset": asset.upper()})
 

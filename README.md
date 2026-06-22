@@ -11,7 +11,7 @@ BingX Autotrade listens to configured Telegram chat topics, parses Aorus trading
 5. Once per UTC day, after the first new signal, the listener saves the latest Alternative.me Crypto Fear & Greed Index into `fear_greed_index`.
 6. `bingx_trader` checks:
    - `signal_score >= MIN_SIGNAL_SCORE`;
-   - risk/reward to TP3 is at least `BINGX_RISK_REWARD_RATIO`;
+   - risk/reward to TP3 is inside `RR_TP3_MIN` / `RR_TP3_MAX` when strategy filters are enabled;
    - currently open trades are below `BINGX_LIMIT_OPENED_POSITIONS`;
    - no active trade or BingX position already exists for the same symbol;
    - `BINGX_MARGIN > 0`.
@@ -161,7 +161,7 @@ To backfill historical values from the first recorded bot trade date:
 
 `BINGX_LEVERAGE`: requested leverage.
 
-`BINGX_RISK_REWARD_RATIO`: minimum ratio between potential profit to TP3 and risk to SL.
+`RR_TP3_MIN` / `RR_TP3_MAX`: allowed reward/risk range between potential profit to TP3 and risk to SL.
 
 `BINGX_POSITION_CHECK_INTERVAL_SECONDS`: open position check interval.
 

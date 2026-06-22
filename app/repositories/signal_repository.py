@@ -3,6 +3,15 @@ from decimal import Decimal
 from app import config
 
 
+async def ensure_signal_context_columns(connection) -> None:
+    async with connection.cursor() as cursor:
+        try:
+            await cursor.execute("ALTER TABLE signals ADD COLUMN btc_change_1h DECIMAL(20, 8) NULL")
+        except Exception as exc:
+            if "Duplicate column" not in str(exc) and "1060" not in str(exc):
+                raise
+
+
 def signal_status_and_reason(signal_score: Decimal | None) -> tuple[str, str | None]:
     """Return DB status and skip reason for a parsed signal score."""
     if signal_score is None:
@@ -24,6 +33,7 @@ async def save_signal(
     fields: dict[str, object],
 ) -> int | None:
     """Insert a parsed Telegram signal into MySQL, ignoring duplicates."""
+    await ensure_signal_context_columns(connection)
     symbol = fields["symbol"]
     direction = fields["direction"]
     if not symbol or not direction:
@@ -117,4 +127,23 @@ async def update_signal_status(connection, *, signal_id: int, status: str, skip_
             WHERE id=%s
             """,
             (status, skip_reason, signal_id),
+        )
+
+
+async def update_signal_market_context(
+    connection,
+    *,
+    signal_id: int,
+    btc_change_1h: Decimal | None,
+) -> None:
+    await ensure_signal_context_columns(connection)
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            """
+            UPDATE signals
+            SET btc_change_1h=%s,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (btc_change_1h, signal_id),
         )

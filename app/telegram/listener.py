@@ -6,6 +6,7 @@ from pathlib import Path
 from types import TracebackType
 
 from telethon import TelegramClient, events
+from telethon.errors.common import TypeNotFoundError
 
 from app import config
 from app.db import connect
@@ -182,6 +183,7 @@ async def run_listener() -> None:
                             signal_id=signal_id,
                             external_id=f"{config.GROUP_ID}:{message.id}",
                             fields=fields,
+                            signal_time=message.date,
                         )
                     except Exception as exc:
                         print(f"TRADE HANDLER ERROR signal_id={signal_id}: {exc}")
@@ -194,7 +196,15 @@ async def run_listener() -> None:
                 f"min_signal_score={config.MIN_SIGNAL_SCORE}, "
                 f"bingx_mode={config.BINGX_MODE}, bingx_base_url={config.BINGX_BASE_URL}"
             )
-            await client.run_until_disconnected()
+            try:
+                await client.run_until_disconnected()
+            except TypeNotFoundError as exc:
+                print(
+                    "TELEGRAM UPDATE PARSE ERROR: Telethon could not parse a Telegram update. "
+                    "Upgrade Telethon and restart the bot. "
+                    f"{exc}"
+                )
+                raise
     finally:
         if monitor_task:
             monitor_task.cancel()

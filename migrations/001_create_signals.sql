@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS signals (
     open_interest_raw VARCHAR(50) NULL,
     funding_rate DECIMAL(12,8) NULL,
     signal_score DECIMAL(10,4) NULL,
+    btc_change_1h DECIMAL(20,8) NULL,
     sl_price DECIMAL(20,10) NULL,
     sl_percent DECIMAL(10,4) NULL,
     tp1_price DECIMAL(20,10) NULL,

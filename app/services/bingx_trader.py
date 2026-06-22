@@ -10,6 +10,8 @@ from typing import Any
 from app import config
 from app.bingx.client import BingXApiError, BingXClient, normalize_contract_symbol
 from app.repositories import signal_repository, trade_repository
+from app.services.market_context_service import btc_change_1h_before_entry
+from app.services.strategy import log_signal_filter_decision, settings_from_config, should_accept_signal, strategy_signal_from_fields
 
 
 ORDER_TYPE_MARKET = "MARKET"
@@ -24,6 +26,7 @@ async def handle_new_signal(
     signal_id: int,
     external_id: str,
     fields: dict[str, object],
+    signal_time: datetime | None = None,
 ) -> None:
     await trade_repository.ensure_trades_table(connection)
     symbol = str(fields.get("symbol") or "UNKNOWN")
@@ -46,6 +49,23 @@ async def handle_new_signal(
     tp1_price = to_decimal(fields["tp1_price"])
     tp2_price = to_decimal(fields["tp2_price"])
     tp3_price = to_decimal(fields["tp3_price"])
+    rr_tp3 = risk_reward_ratio(direction=direction, entry=entry_price, stop_loss=sl_price, take_profit=tp3_price)
+    btc_change_1h = await load_and_save_btc_change_1h(connection, client, signal_id=signal_id, signal_time=signal_time)
+    if btc_change_1h is not None:
+        fields = dict(fields)
+        fields["btc_change_1h"] = btc_change_1h
+    strategy_signal = strategy_signal_from_fields(fields, rr_tp3=rr_tp3, signal_time=signal_time)
+    accepted, filter_reason = should_accept_signal(strategy_signal, settings_from_config())
+    log_signal_filter_decision(strategy_signal, accepted, filter_reason)
+    if not accepted:
+        await signal_repository.update_signal_status(
+            connection,
+            signal_id=signal_id,
+            status="SKIPPED",
+            skip_reason=filter_reason,
+        )
+        print(f"TRADE SKIP signal_id={signal_id} symbol={symbol} contract={requested_contract_symbol}: {filter_reason}")
+        return
 
     try:
         contract = await get_contract(client, requested_contract_symbol)
@@ -230,6 +250,28 @@ async def handle_new_signal(
             skip_reason=reason,
         )
         print(f"TRADE OPEN FAILED signal_id={signal_id} trade_id={trade_id}: {reason}")
+
+
+async def load_and_save_btc_change_1h(
+    connection,
+    client: BingXClient,
+    *,
+    signal_id: int,
+    signal_time: datetime | None,
+) -> Decimal | None:
+    try:
+        value = await btc_change_1h_before_entry(client, signal_time)
+    except Exception as exc:
+        print(f"MARKET CONTEXT WARNING signal_id={signal_id}: btc_change_1h unavailable: {exc}")
+        return None
+
+    await signal_repository.update_signal_market_context(
+        connection,
+        signal_id=signal_id,
+        btc_change_1h=value,
+    )
+    print(f"MARKET CONTEXT signal_id={signal_id} btc_change_1h={value}")
+    return value
 
 
 async def handle_opened_position_without_tpsl(
@@ -524,7 +566,7 @@ async def sync_one_open_trade(
             side="SELL" if trade["direction"] == "BUY" else "BUY",
             position_side=POSITION_LONG if trade["direction"] == "BUY" else POSITION_SHORT,
             order_type=ORDER_TYPE_MARKET,
-            quantity=trade["volume"],
+            quantity=position_quantity(position, default=trade["volume"]),
         )
         await asyncio.sleep(1)
         close_result = await closed_trade_result_from_history(client, trade, current_price)
@@ -548,6 +590,7 @@ async def sync_one_open_trade(
         )
         return
 
+    await maybe_close_partial_take_profit(connection, client, trade, position, current_price)
     moved_stop = await maybe_move_stop_loss(connection, client, trade, position, current_price, roi, pnl)
     if not moved_stop:
         await maybe_sync_stop_loss_order(connection, client, trade, position)
@@ -559,6 +602,54 @@ async def sync_one_open_trade(
         pnl=pnl,
         margin=actual_margin,
     )
+
+
+async def maybe_close_partial_take_profit(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    current_price: Decimal,
+) -> None:
+    levels = (
+        ("tp1", "tp1_price", "tp1_closed_at", config.TP1_CLOSE_PERCENT),
+        ("tp2", "tp2_price", "tp2_closed_at", config.TP2_CLOSE_PERCENT),
+    )
+    for level, price_key, closed_key, percent_to_close in levels:
+        if percent_to_close <= 0:
+            continue
+        if trade.get(closed_key) is not None:
+            continue
+        if not reached_price(trade["direction"], current_price, trade[price_key]):
+            continue
+
+        quantity = partial_close_quantity(trade, position, percent_to_close)
+        if quantity <= 0:
+            continue
+        close_response = await client.place_order(
+            symbol=trade["contract_symbol"],
+            side="SELL" if trade["direction"] == "BUY" else "BUY",
+            position_side=POSITION_LONG if trade["direction"] == "BUY" else POSITION_SHORT,
+            order_type=ORDER_TYPE_MARKET,
+            quantity=quantity,
+        )
+        await trade_repository.mark_take_profit_closed(
+            connection,
+            trade_id=trade["id"],
+            level=level,
+            raw_response={"level": level, "percent": percent_to_close, "order": close_response},
+        )
+        trade[closed_key] = datetime.now(timezone.utc)
+        print(f"TRADE PARTIAL CLOSE trade_id={trade['id']} level={level} percent={percent_to_close} quantity={quantity}")
+
+
+def partial_close_quantity(trade: dict[str, Any], position: dict[str, Any], percent_to_close: Decimal) -> Decimal:
+    original_quantity = to_decimal(trade.get("volume"), default=Decimal("0"))
+    current_quantity = position_quantity(position, default=original_quantity)
+    requested_quantity = original_quantity * percent_to_close / Decimal("100")
+    if requested_quantity <= 0:
+        return Decimal("0")
+    return min(requested_quantity, current_quantity)
 
 
 async def signal_is_eligible(
@@ -579,15 +670,6 @@ async def signal_is_eligible(
             return False, f"{key} is missing"
         if value <= 0:
             return False, f"{key} must be greater than 0"
-
-    ratio = risk_reward_ratio(
-        direction=str(fields["direction"]),
-        entry=to_decimal(fields["price"]),
-        stop_loss=to_decimal(fields["sl_price"]),
-        take_profit=to_decimal(fields["tp3_price"]),
-    )
-    if ratio < config.BINGX_RISK_REWARD_RATIO:
-        return False, f"Risk/reward {ratio} is below minimum {config.BINGX_RISK_REWARD_RATIO}"
 
     open_trades = await trade_repository.count_open_trades(connection)
     if open_trades >= config.BINGX_LIMIT_OPENED_POSITIONS:
@@ -613,15 +695,28 @@ async def maybe_move_stop_loss(
     roi: Decimal | None,
     pnl: Decimal | None,
 ) -> bool:
+    if config.STOP_MOVE_MODE == "none":
+        return False
+
     direction = trade["direction"]
     next_stop = None
     reached_column = None
 
-    if trade.get("tp2_reached_at") is None and reached_price(direction, current_price, trade["tp2_price"]):
+    if (
+        config.STOP_MOVE_MODE == "move_sl_to_be_after_tp1_and_to_tp1_after_tp2"
+        and trade.get("tp2_reached_at") is None
+        and reached_price(direction, current_price, trade["tp2_price"])
+    ):
         next_stop = fee_adjusted_stop(direction, trade["tp1_price"], trade["fee_rate"])
         reached_column = "tp2_reached_at"
-    elif trade.get("break_even_moved_at") is None and (
-        reached_price(direction, current_price, trade["tp1_price"]) or (roi is not None and roi >= Decimal("100"))
+
+    tp1_touch_moves_stop = config.MOVE_SL_TO_BE_ON_TP1_TOUCH or config.TP1_CLOSE_PERCENT > 0
+    if (
+        next_stop is None
+        and tp1_touch_moves_stop
+        and config.STOP_MOVE_MODE in {"move_sl_to_be_after_tp1", "move_sl_to_be_after_tp1_and_to_tp1_after_tp2"}
+        and trade.get("break_even_moved_at") is None
+        and (reached_price(direction, current_price, trade["tp1_price"]) or (roi is not None and roi >= Decimal("100")))
     ):
         avg_entry = to_decimal(trade.get("avg_entry_price"), default=trade["entry_price"])
         next_stop = break_even_price(direction, avg_entry, trade["fee_rate"])

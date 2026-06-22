@@ -56,6 +56,9 @@ TRADE_COLUMNS = {
     "break_even_moved_at": "DATETIME NULL",
     "tp1_reached_at": "DATETIME NULL",
     "tp2_reached_at": "DATETIME NULL",
+    "tp1_closed_at": "DATETIME NULL",
+    "tp2_closed_at": "DATETIME NULL",
+    "tp3_closed_at": "DATETIME NULL",
     "opened_at": "DATETIME NULL",
     "closed_at": "DATETIME NULL",
     "raw_open_response": "JSON NULL",
@@ -358,6 +361,35 @@ async def update_trade_stop(
             WHERE id=%s
             """,
             (stop_price, stop_plan_order_id, price, roi, pnl, trade_id),
+        )
+
+
+async def mark_take_profit_closed(
+    connection,
+    *,
+    trade_id: int,
+    level: str,
+    raw_response: Any = None,
+) -> None:
+    columns = {
+        "tp1": "tp1_closed_at",
+        "tp2": "tp2_closed_at",
+        "tp3": "tp3_closed_at",
+    }
+    column = columns.get(level)
+    if not column:
+        raise ValueError(f"Unsupported take profit level: {level}")
+
+    async with connection.cursor() as cursor:
+        await cursor.execute(
+            f"""
+            UPDATE trades
+            SET {column}=COALESCE({column}, CURRENT_TIMESTAMP),
+                raw_close_response=COALESCE(%s, raw_close_response),
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (to_json(raw_response), trade_id),
         )
 
 
