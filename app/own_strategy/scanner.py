@@ -61,14 +61,24 @@ async def run_own_strategy_scanner(*, dry_run: bool = False) -> None:
         if not own_trading_capabilities_ok(bingx_client):
             print("RS_PULLBACK_V1 requires exchange-side SL management. Auto trading disabled.")
             return
+        fill_watcher_task = None
+        if not dry_run:
+            fill_watcher_task = asyncio.create_task(run_opening_order_watcher())
         while True:
             await sync_fear_greed_for_own_mode(connection)
-            await sync_opening_own_trades(connection, bingx_client)
+            if dry_run:
+                await sync_opening_own_trades(connection, bingx_client)
             await scan_once(connection, bingx_client, coinalyze_client)
             if dry_run:
                 return
             await asyncio.sleep(config.OWN_SCAN_INTERVAL_SECONDS)
     finally:
+        if "fill_watcher_task" in locals() and fill_watcher_task:
+            fill_watcher_task.cancel()
+            try:
+                await fill_watcher_task
+            except asyncio.CancelledError:
+                pass
         connection.close()
         await bingx_client.close()
         await coinalyze_client.close()
@@ -82,6 +92,26 @@ def own_trading_capabilities_ok(client: BingXClient) -> bool:
         and getattr(client, "supports_place_stop_order", False)
         and getattr(client, "supports_cancel_stop_order", False)
     )
+
+
+async def run_opening_order_watcher() -> None:
+    connection = await connect()
+    client = BingXClient(
+        BingXCredentials(config.BINGX_API, config.BINGX_SECRET),
+        base_url=config.BINGX_BASE_URL,
+        demo=config.BINGX_DEMO,
+        public_max_requests_per_minute=config.BINGX_MARKET_MAX_REQUESTS_PER_MINUTE,
+    )
+    try:
+        while True:
+            try:
+                await sync_opening_own_trades(connection, client)
+            except Exception as exc:
+                print(f"OWN OPENING WATCHER ERROR: {exc}")
+            await asyncio.sleep(config.OWN_ORDER_FILL_CHECK_INTERVAL_SECONDS)
+    finally:
+        connection.close()
+        await client.close()
 
 
 async def sync_fear_greed_for_own_mode(connection) -> None:

@@ -64,6 +64,7 @@ def print_stats_block(title: str, data: dict[str, Any]) -> None:
         f"PnL {money(active_pnl)} | "
         f"ROI {pct(percent(active_pnl, active_margin))}"
     )
+    print(f"Opening      : {int(data.get('opening_trades') or 0)}")
     print(
         f"Paper Active : {int(data.get('paper_active_trades') or 0)} | "
         f"Margin {money(paper_margin)} | "

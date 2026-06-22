@@ -541,6 +541,7 @@ async def log_trade_stats(connection) -> None:
         "STATS "
         f"total={int(stats.get('total_trades') or 0)} "
         f"active={int(stats.get('active_trades') or 0)} "
+        f"opening={int(stats.get('opening_trades') or 0)} "
         f"paper_active={int(stats.get('paper_active_trades') or 0)} "
         f"closed={int(stats.get('closed_trades') or 0)} "
         f"tp={int(stats.get('tp_trades') or 0)} "

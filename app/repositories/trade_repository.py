@@ -127,7 +127,8 @@ def stats_select(alias: str | None = None) -> str:
     prefix = f"{alias}." if alias else ""
     return f"""
                 COUNT(*) AS total_trades,
-                SUM({prefix}status IN {OPEN_TRADE_STATUS_SQL}) AS active_trades,
+                SUM({prefix}status = 'OPEN') AS active_trades,
+                SUM({prefix}status = 'OPENING') AS opening_trades,
                 SUM({prefix}status IN {PAPER_TRADE_STATUS_SQL}) AS paper_active_trades,
                 SUM({prefix}status = 'CLOSED') AS closed_trades,
                 SUM({prefix}status = 'CLOSED' AND {prefix}close_reason IN ('TP3_REACHED', 'TP3')) AS full_tp3_trades,
@@ -191,21 +192,21 @@ def stats_select(alias: str | None = None) -> str:
                     )
                 ) AS reached_tp3_trades,
                 SUM(
-                    {prefix}status IN {OPEN_TRADE_STATUS_SQL}
+                    {prefix}status = 'OPEN'
                     AND ({prefix}break_even_moved_at IS NOT NULL OR {prefix}sl_moved_after_tp1_at IS NOT NULL)
                 ) AS active_reached_tp1_trades,
                 SUM(
                     {prefix}status = 'CLOSED'
                     AND {prefix}close_reason IN ('TP1_STOP_TRIGGERED', 'TP2_STOP_TRIGGERED', 'TRAILING_SL_PLUS_0_5R_AFTER_TP1')
                 ) AS be_closed_trades,
-                COALESCE(SUM(CASE WHEN {prefix}status IN {OPEN_TRADE_STATUS_SQL} THEN {prefix}last_pnl ELSE 0 END), 0) AS active_pnl,
-                COALESCE(SUM(CASE WHEN {prefix}status IN {OPEN_TRADE_STATUS_SQL} THEN {prefix}margin ELSE 0 END), 0) AS active_margin,
+                COALESCE(SUM(CASE WHEN {prefix}status = 'OPEN' THEN {prefix}last_pnl ELSE 0 END), 0) AS active_pnl,
+                COALESCE(SUM(CASE WHEN {prefix}status = 'OPEN' THEN {prefix}margin ELSE 0 END), 0) AS active_margin,
                 COALESCE(SUM(CASE WHEN {prefix}status IN {PAPER_TRADE_STATUS_SQL} THEN {prefix}last_pnl ELSE 0 END), 0) AS paper_active_pnl,
                 COALESCE(SUM(CASE WHEN {prefix}status IN {PAPER_TRADE_STATUS_SQL} THEN {prefix}margin ELSE 0 END), 0) AS paper_active_margin,
                 COALESCE(SUM(CASE WHEN {prefix}status = 'CLOSED' THEN {prefix}realized_pnl ELSE 0 END), 0) AS closed_pnl,
                 COALESCE(SUM(CASE WHEN {prefix}status = 'CLOSED' THEN {prefix}margin ELSE 0 END), 0) AS closed_margin,
-                COALESCE(SUM(CASE WHEN {prefix}status IN {OPEN_TRADE_STATUS_SQL} THEN {prefix}last_pnl ELSE {prefix}realized_pnl END), 0) AS total_pnl,
-                COALESCE(SUM(CASE WHEN {prefix}status NOT IN {PAPER_TRADE_STATUS_SQL} THEN {prefix}margin ELSE 0 END), 0) AS total_margin
+                COALESCE(SUM(CASE WHEN {prefix}status = 'OPEN' THEN {prefix}last_pnl ELSE {prefix}realized_pnl END), 0) AS total_pnl,
+                COALESCE(SUM(CASE WHEN {prefix}status NOT IN {PAPER_TRADE_STATUS_SQL} AND {prefix}status != 'OPENING' THEN {prefix}margin ELSE 0 END), 0) AS total_margin
 """
 
 
