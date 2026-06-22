@@ -51,6 +51,8 @@ def print_stats_block(title: str, data: dict[str, Any]) -> None:
     active_margin = to_decimal(data.get("active_margin"))
     closed_pnl = to_decimal(data.get("closed_pnl"))
     closed_margin = to_decimal(data.get("closed_margin"))
+    paper_pnl = to_decimal(data.get("paper_active_pnl"))
+    paper_margin = to_decimal(data.get("paper_active_margin"))
     total_pnl = to_decimal(data.get("total_pnl"))
     total_margin = to_decimal(data.get("total_margin"))
 
@@ -61,6 +63,12 @@ def print_stats_block(title: str, data: dict[str, Any]) -> None:
         f"Margin {money(active_margin)} | "
         f"PnL {money(active_pnl)} | "
         f"ROI {pct(percent(active_pnl, active_margin))}"
+    )
+    print(
+        f"Paper Active : {int(data.get('paper_active_trades') or 0)} | "
+        f"Margin {money(paper_margin)} | "
+        f"PnL {money(paper_pnl)} | "
+        f"ROI {pct(percent(paper_pnl, paper_margin))}"
     )
     print(
         f"Closed       : {int(data.get('closed_trades') or 0)} | "

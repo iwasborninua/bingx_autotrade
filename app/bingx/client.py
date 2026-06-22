@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -37,6 +38,36 @@ class BingXCredentials:
     secret_key: str
 
 
+class BingXRateLimiter:
+    def __init__(self, max_requests_per_minute: int) -> None:
+        self.max_requests = max_requests_per_minute
+        self.window_seconds = 60.0
+        self.window_started_at = time.monotonic()
+        self.request_count = 0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self.window_started_at
+            if elapsed >= self.window_seconds:
+                self.window_started_at = now
+                self.request_count = 0
+                elapsed = 0
+
+            if self.request_count >= self.max_requests:
+                sleep_seconds = max(self.window_seconds - elapsed, 0)
+                print(
+                    f"BingXMarketRateLimiter {self.request_count}/{self.max_requests} "
+                    f"reached, sleeping {sleep_seconds:.1f} sec"
+                )
+                await asyncio.sleep(sleep_seconds)
+                self.window_started_at = time.monotonic()
+                self.request_count = 0
+
+            self.request_count += 1
+
+
 class BingXClient:
     """Small async wrapper around BingX USDT perpetual swap REST API."""
 
@@ -48,12 +79,30 @@ class BingXClient:
         demo: bool = False,
         recv_window: int = 10_000,
         timeout: float = 10.0,
+        public_max_requests_per_minute: int | None = None,
     ) -> None:
         self.credentials = credentials
         self.base_url = base_url.rstrip("/")
         self.demo = demo
         self.recv_window = recv_window
+        self.public_rate_limiter = (
+            BingXRateLimiter(public_max_requests_per_minute)
+            if public_max_requests_per_minute and public_max_requests_per_minute > 0
+            else None
+        )
         self._http = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
+
+    @property
+    def supports_stop_loss_orders(self) -> bool:
+        return True
+
+    @property
+    def supports_place_stop_order(self) -> bool:
+        return True
+
+    @property
+    def supports_cancel_stop_order(self) -> bool:
+        return True
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -301,6 +350,8 @@ class BingXClient:
         )
 
     async def _public_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        if self.public_rate_limiter:
+            await self.public_rate_limiter.wait()
         response = await self._http.get(path, params=compact_dict(params or {}))
         return self._unwrap_response(response, path=path)
 

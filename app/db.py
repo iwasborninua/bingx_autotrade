@@ -1,6 +1,12 @@
+import warnings
+
 import aiomysql
 
 from app import config
+
+
+warnings.filterwarnings("ignore", message=r"Table '.*' already exists", category=Warning)
+warnings.filterwarnings("ignore", message=r".*'VALUES function' is deprecated.*", category=Warning)
 
 
 async def connect():

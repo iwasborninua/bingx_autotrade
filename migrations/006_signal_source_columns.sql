@@ -1,0 +1,3 @@
+ALTER TABLE signals ADD COLUMN signal_source VARCHAR(32) NOT NULL DEFAULT 'telegram';
+ALTER TABLE signals ADD COLUMN strategy_name VARCHAR(128) NULL;
+ALTER TABLE signals ADD COLUMN setup_type VARCHAR(128) NULL;

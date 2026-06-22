@@ -5,11 +5,18 @@ from app import config
 
 async def ensure_signal_context_columns(connection) -> None:
     async with connection.cursor() as cursor:
-        try:
-            await cursor.execute("ALTER TABLE signals ADD COLUMN btc_change_1h DECIMAL(20, 8) NULL")
-        except Exception as exc:
-            if "Duplicate column" not in str(exc) and "1060" not in str(exc):
-                raise
+        columns = {
+            "btc_change_1h": "DECIMAL(20, 8) NULL",
+            "signal_source": "VARCHAR(32) NOT NULL DEFAULT 'telegram'",
+            "strategy_name": "VARCHAR(128) NULL",
+            "setup_type": "VARCHAR(128) NULL",
+        }
+        for column, definition in columns.items():
+            try:
+                await cursor.execute(f"ALTER TABLE signals ADD COLUMN {column} {definition}")
+            except Exception as exc:
+                if "Duplicate column" not in str(exc) and "1060" not in str(exc):
+                    raise
 
 
 def signal_status_and_reason(signal_score: Decimal | None) -> tuple[str, str | None]:
@@ -49,6 +56,9 @@ async def save_signal(
             INSERT IGNORE INTO signals (
                 topic_id,
                 external_id,
+                signal_source,
+                strategy_name,
+                setup_type,
                 symbol,
                 direction,
                 price,
@@ -73,12 +83,15 @@ async def save_signal(
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, CURRENT_TIMESTAMP
+                %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP
             )
             """,
             (
                 topic_id,
                 external_id,
+                "telegram",
+                "TELEGRAM_SIGNAL",
+                None,
                 symbol,
                 direction,
                 fields["price"],

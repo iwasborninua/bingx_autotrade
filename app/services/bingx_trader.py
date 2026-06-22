@@ -3,8 +3,9 @@ import html
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
+from pathlib import Path
 from typing import Any
 
 from app import config
@@ -143,6 +144,9 @@ async def handle_new_signal(
         connection,
         {
             "signal_id": signal_id,
+            "signal_source": "telegram",
+            "strategy_name": "TELEGRAM_SIGNAL",
+            "setup_type": None,
             "external_id": external_id,
             "symbol": symbol,
             "contract_symbol": contract_symbol,
@@ -442,6 +446,58 @@ async def place_position_tpsl(
     return stop_response, take_profit_response
 
 
+async def place_stop_loss_order(
+    client: BingXClient,
+    *,
+    symbol: str,
+    side: str,
+    quantity: Decimal,
+    stop_price: Decimal,
+    position_side: str | None = None,
+    reduce_only: bool = True,
+) -> str:
+    response = await client.place_order(
+        symbol=symbol,
+        side=side,
+        position_side=position_side or (POSITION_LONG if side.upper() == "SELL" else POSITION_SHORT),
+        order_type="STOP_MARKET",
+        quantity=quantity,
+        stop_price=stop_price,
+        close_position=reduce_only,
+        working_type="MARK_PRICE",
+    )
+    order_id = extract_order_id(response)
+    if not order_id:
+        raise RuntimeError(f"BingX stop loss order id is missing: {response}")
+    return order_id
+
+
+async def place_take_profit_order(
+    client: BingXClient,
+    *,
+    symbol: str,
+    side: str,
+    quantity: Decimal,
+    take_profit_price: Decimal,
+    position_side: str | None = None,
+    reduce_only: bool = True,
+) -> str:
+    response = await client.place_order(
+        symbol=symbol,
+        side=side,
+        position_side=position_side or (POSITION_LONG if side.upper() == "SELL" else POSITION_SHORT),
+        order_type="TAKE_PROFIT_MARKET",
+        quantity=quantity,
+        stop_price=take_profit_price,
+        close_position=reduce_only,
+        working_type="MARK_PRICE",
+    )
+    order_id = extract_order_id(response)
+    if not order_id:
+        raise RuntimeError(f"BingX take profit order id is missing: {response}")
+    return order_id
+
+
 async def replace_stop_loss_order(
     client: BingXClient,
     trade: dict[str, Any],
@@ -485,6 +541,7 @@ async def log_trade_stats(connection) -> None:
         "STATS "
         f"total={int(stats.get('total_trades') or 0)} "
         f"active={int(stats.get('active_trades') or 0)} "
+        f"paper_active={int(stats.get('paper_active_trades') or 0)} "
         f"closed={int(stats.get('closed_trades') or 0)} "
         f"tp={int(stats.get('tp_trades') or 0)} "
         f"sl={int(stats.get('sl_trades') or 0)} "
@@ -560,6 +617,15 @@ async def sync_one_open_trade(
         )
         return
 
+    if is_rs_pullback_trade(trade) and await maybe_handle_rs_pullback_emergency_protection(
+        connection,
+        client,
+        trade,
+        position,
+        current_price,
+    ):
+        return
+
     if reached_price(trade["direction"], current_price, trade["tp3_price"]):
         close_response = await client.place_order(
             symbol=trade["contract_symbol"],
@@ -578,7 +644,7 @@ async def sync_one_open_trade(
         await trade_repository.close_trade(
             connection,
             trade_id=trade["id"],
-            reason="TP3_REACHED",
+            reason="TP3" if is_rs_pullback_trade(trade) else "TP3_REACHED",
             raw_close_response={"close_order": close_response, "history": close_result.get("raw_history")},
             close_price=close_price,
             realized_roi=realized_roi,
@@ -586,8 +652,25 @@ async def sync_one_open_trade(
         )
         print(
             f"TRADE CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} "
-            f"reason=TP3_REACHED pnl={realized_pnl}"
+            f"reason={'TP3' if is_rs_pullback_trade(trade) else 'TP3_REACHED'} pnl={realized_pnl}"
         )
+        return
+
+    if is_rs_pullback_trade(trade):
+        if await maybe_close_rs_pullback_by_ttl_or_mfe(connection, client, trade, position, current_price, roi, pnl):
+            return
+        moved_stop = await maybe_move_rs_pullback_stop_after_tp1(
+            connection,
+            client,
+            trade,
+            position,
+            current_price,
+            roi,
+            pnl,
+        )
+        if not moved_stop:
+            await maybe_sync_stop_loss_order(connection, client, trade, position)
+        await update_rs_pullback_r_metrics(connection, trade, current_price, roi, pnl, actual_margin)
         return
 
     await maybe_close_partial_take_profit(connection, client, trade, position, current_price)
@@ -743,6 +826,310 @@ async def maybe_move_stop_loss(
     )
     print(f"TRADE SL MOVED trade_id={trade['id']} stop={next_stop} reason={reached_column}")
     return True
+
+
+def is_rs_pullback_trade(trade: dict[str, Any]) -> bool:
+    return str(trade.get("signal_source") or "").lower() == "own" and str(trade.get("strategy_name") or "") == "RS_PULLBACK_V1"
+
+
+async def maybe_handle_rs_pullback_emergency_protection(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    current_price: Decimal,
+) -> bool:
+    if str(trade.get("protection_status") or "") in {"INITIAL_SL_PLACED", "SL_MOVED_AFTER_TP1"}:
+        return False
+    quantity = position_quantity(position, default=to_decimal(trade["volume"]))
+    stop_price = to_decimal(trade.get("current_stop_price") or trade.get("current_sl_price") or trade.get("initial_sl_price"))
+    print(
+        f"RS_PULLBACK CRITICAL UNPROTECTED trade_id={trade['id']} "
+        f"symbol={trade['contract_symbol']} protection_status={trade.get('protection_status')}"
+    )
+    try:
+        log_own_protection_event(
+            "SL_PLACE_ATTEMPT",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            qty=quantity,
+            new_sl=stop_price,
+            error="EMERGENCY_UNPROTECTED",
+        )
+        stop_order_id = await place_stop_loss_order(
+            client,
+            symbol=trade["contract_symbol"],
+            side="SELL",
+            quantity=quantity,
+            stop_price=stop_price,
+            position_side=POSITION_LONG,
+        )
+        await trade_repository.sync_trade_stop_from_exchange(
+            connection,
+            trade_id=trade["id"],
+            stop_price=stop_price,
+            stop_plan_order_id=stop_order_id,
+        )
+        async with connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE trades
+                SET protection_status='INITIAL_SL_PLACED',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (trade["id"],),
+            )
+        print(f"RS_PULLBACK EMERGENCY SL PLACED trade_id={trade['id']} order_id={stop_order_id}")
+        log_own_protection_event(
+            "SL_PLACED",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            qty=quantity,
+            new_sl=stop_price,
+            exchange_sl_order_id=stop_order_id,
+        )
+        return False
+    except Exception as exc:
+        reason = format_exception(exc)
+        log_own_protection_event(
+            "SL_PLACE_FAILED",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            qty=quantity,
+            new_sl=stop_price,
+            error=reason,
+        )
+        async with connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE trades
+                SET protection_status='PROTECTION_FAILED',
+                    close_reason='PROTECTION_FAILED_CLOSE',
+                    error_message=%s,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (reason, trade["id"]),
+            )
+        if config.RS_PULLBACK_CLOSE_IF_SL_PLACE_FAILED:
+            close_response = await client.place_order(
+                symbol=trade["contract_symbol"],
+                side="SELL",
+                position_side=POSITION_LONG,
+                order_type=ORDER_TYPE_MARKET,
+                quantity=quantity,
+            )
+            await trade_repository.close_trade(
+                connection,
+                trade_id=trade["id"],
+                reason="PROTECTION_FAILED_CLOSE",
+                raw_close_response={"stop_error": reason, "close_order": close_response},
+                close_price=current_price,
+            )
+            print(f"RS_PULLBACK EMERGENCY CLOSED trade_id={trade['id']}: {reason}")
+            log_own_protection_event(
+                "PROTECTION_FAILED_CLOSE",
+                trade_id=trade["id"],
+                symbol=trade["contract_symbol"],
+                qty=quantity,
+                new_sl=stop_price,
+                bingx_response=close_response,
+                error=reason,
+            )
+            return True
+        return False
+
+
+async def maybe_move_rs_pullback_stop_after_tp1(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    current_price: Decimal,
+    roi: Decimal | None,
+    pnl: Decimal | None,
+) -> bool:
+    if not config.RS_PULLBACK_MOVE_SL_AFTER_TP1_ENABLED:
+        return False
+    if trade.get("tp1_reached_at") is not None:
+        return False
+    if not reached_price(trade["direction"], current_price, trade["tp1_price"]):
+        return False
+
+    entry = to_decimal(trade.get("avg_entry_price"), default=trade["entry_price"])
+    risk = to_decimal(trade.get("risk_price"), default=None)
+    if risk is None or risk <= 0:
+        initial_stop = to_decimal(trade.get("initial_stop_price") or trade.get("initial_sl_price") or trade.get("original_sl_price"))
+        risk = entry - initial_stop
+    new_stop = entry + risk * config.RS_PULLBACK_MOVE_SL_AFTER_TP1_TO_R
+    current_stop = to_decimal(trade.get("current_sl_price") or trade.get("current_stop_price"))
+    initial_stop = to_decimal(trade.get("initial_stop_price") or trade.get("initial_sl_price") or trade.get("original_sl_price"))
+    if new_stop <= current_stop or new_stop < entry or new_stop < initial_stop:
+        print(f"RS_PULLBACK SL MOVE SKIP trade_id={trade['id']} current={current_stop} new={new_stop}")
+        return False
+
+    try:
+        log_own_protection_event(
+            "SL_MOVE_ATTEMPT_AFTER_TP1",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            qty=position_quantity(position, default=to_decimal(trade["volume"])),
+            old_sl=current_stop,
+            new_sl=new_stop,
+        )
+        stop_response = await replace_stop_loss_order(client, trade, position, new_stop)
+        stop_plan_order_id = extract_order_id(stop_response) or stop_order_id_from_trade(trade)
+        await trade_repository.mark_own_sl_moved_after_tp1(
+            connection,
+            trade_id=trade["id"],
+            stop_price=new_stop,
+            stop_plan_order_id=stop_plan_order_id,
+            roi=roi,
+            pnl=pnl,
+            price=current_price,
+        )
+        print(
+            f"RS_PULLBACK SL MOVED trade_id={trade['id']} symbol={trade['contract_symbol']} "
+            f"old_sl={current_stop} new_sl={new_stop} order_id={stop_plan_order_id}"
+        )
+        log_own_protection_event(
+            "SL_MOVED_AFTER_TP1",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            old_sl=current_stop,
+            new_sl=new_stop,
+            exchange_sl_order_id=stop_plan_order_id,
+        )
+        return True
+    except Exception as exc:
+        async with connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE trades
+                SET protection_status='SL_MOVE_FAILED',
+                    sl_move_status='FAILED',
+                    sl_move_error=%s,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (format_exception(exc), trade["id"]),
+            )
+        print(f"RS_PULLBACK SL MOVE FAILED trade_id={trade['id']}: {exc}")
+        log_own_protection_event(
+            "SL_MOVE_FAILED",
+            trade_id=trade["id"],
+            symbol=trade["contract_symbol"],
+            old_sl=current_stop,
+            new_sl=new_stop,
+            error=format_exception(exc),
+        )
+        return False
+
+
+async def maybe_close_rs_pullback_by_ttl_or_mfe(
+    connection,
+    client: BingXClient,
+    trade: dict[str, Any],
+    position: dict[str, Any],
+    current_price: Decimal,
+    roi: Decimal | None,
+    pnl: Decimal | None,
+) -> bool:
+    opened_at = parse_datetime(trade.get("opened_at") or trade.get("created_at"))
+    if opened_at is None:
+        return False
+    now = datetime.now(timezone.utc)
+    age = now - opened_at
+    reason = None
+    if age >= timedelta(hours=config.RS_PULLBACK_TTL_HOURS):
+        reason = "TTL_EXPIRED"
+    elif age >= timedelta(hours=config.RS_PULLBACK_CLOSE_IF_MFE_BELOW_R_AFTER_HOURS):
+        mfe = current_max_favorable_r(trade, current_price)
+        stored_mfe = to_decimal(trade.get("max_favorable_r"), default=None)
+        if stored_mfe is not None:
+            mfe = max(mfe, stored_mfe)
+        if mfe < config.RS_PULLBACK_CLOSE_IF_MFE_BELOW_R_VALUE:
+            reason = "EARLY_CLOSE_MFE_BELOW_1R_AFTER_2H"
+
+    if reason is None:
+        return False
+
+    close_response = await client.place_order(
+        symbol=trade["contract_symbol"],
+        side="SELL" if trade["direction"] == "BUY" else "BUY",
+        position_side=POSITION_LONG if trade["direction"] == "BUY" else POSITION_SHORT,
+        order_type=ORDER_TYPE_MARKET,
+        quantity=position_quantity(position, default=trade["volume"]),
+    )
+    await trade_repository.close_trade(
+        connection,
+        trade_id=trade["id"],
+        reason=reason,
+        raw_close_response={"close_order": close_response},
+        close_price=current_price,
+        realized_roi=roi,
+        realized_pnl=pnl,
+    )
+    print(f"RS_PULLBACK CLOSED trade_id={trade['id']} symbol={trade['contract_symbol']} reason={reason}")
+    return True
+
+
+async def update_rs_pullback_r_metrics(
+    connection,
+    trade: dict[str, Any],
+    current_price: Decimal,
+    roi: Decimal | None,
+    pnl: Decimal | None,
+    margin: Decimal | None,
+) -> None:
+    await trade_repository.update_own_trade_r_metrics(
+        connection,
+        trade_id=trade["id"],
+        max_favorable_r=current_max_favorable_r(trade, current_price),
+        max_adverse_r=current_max_adverse_r(trade, current_price),
+        price=current_price,
+        roi=roi,
+        pnl=pnl,
+        margin=margin,
+    )
+
+
+def current_max_favorable_r(trade: dict[str, Any], current_price: Decimal) -> Decimal:
+    entry = to_decimal(trade.get("avg_entry_price"), default=trade["entry_price"])
+    risk = to_decimal(trade.get("risk_price"), default=None)
+    if risk is None or risk <= 0:
+        stop = to_decimal(trade.get("initial_stop_price") or trade.get("initial_sl_price") or trade.get("original_sl_price"))
+        risk = entry - stop
+    if risk <= 0:
+        return Decimal("0")
+    return ((current_price - entry) / risk).quantize(Decimal("0.00000001"))
+
+
+def current_max_adverse_r(trade: dict[str, Any], current_price: Decimal) -> Decimal:
+    entry = to_decimal(trade.get("avg_entry_price"), default=trade["entry_price"])
+    risk = to_decimal(trade.get("risk_price"), default=None)
+    if risk is None or risk <= 0:
+        stop = to_decimal(trade.get("initial_stop_price") or trade.get("initial_sl_price") or trade.get("original_sl_price"))
+        risk = entry - stop
+    if risk <= 0:
+        return Decimal("0")
+    return ((current_price - entry) / risk).quantize(Decimal("0.00000001"))
+
+
+def parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 async def maybe_sync_stop_loss_order(
@@ -1045,7 +1432,13 @@ async def find_stop_plan_order_id(
 
 
 def stop_order_id_from_trade(trade: dict[str, Any]) -> str | None:
-    stop_plan_order_id = extract_id(trade, "stop_plan_order_id", "stopPlanOrderId", "stopLossOrderId")
+    stop_plan_order_id = extract_id(
+        trade,
+        "exchange_sl_order_id",
+        "stop_plan_order_id",
+        "stopPlanOrderId",
+        "stopLossOrderId",
+    )
     if stop_plan_order_id:
         return stop_plan_order_id
 
@@ -1101,6 +1494,11 @@ def stop_close_reason(trade: dict[str, Any]) -> str:
     direction = str(trade["direction"])
     current_stop = to_decimal(trade.get("current_sl_price"), default=None)
     tp1_price = to_decimal(trade.get("tp1_price"), default=None)
+
+    if is_rs_pullback_trade(trade):
+        if trade.get("tp1_reached_at") is not None or str(trade.get("protection_status") or "") == "SL_MOVED_AFTER_TP1":
+            return "TRAILING_SL_PLUS_0_5R_AFTER_TP1"
+        return "SL"
 
     if trade.get("tp2_reached_at") is not None:
         return "TP2_STOP_TRIGGERED"
@@ -1401,3 +1799,13 @@ def clean_error_text(value: str) -> str:
     value = re.sub(r"<[^>]+>", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:255]
+
+
+def log_own_protection_event(event: str, **fields: Any) -> None:
+    log_dir = config.BASE_DIR / "logs"
+    log_dir.mkdir(exist_ok=True)
+    parts = [datetime.now(timezone.utc).isoformat(), event]
+    for key, value in fields.items():
+        if value is not None:
+            parts.append(f"{key}={value}")
+    Path(log_dir / "own_strategy_protection.log").open("a", encoding="utf-8").write(" ".join(parts) + "\n")

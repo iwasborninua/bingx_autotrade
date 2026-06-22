@@ -42,7 +42,13 @@ async def main() -> None:
             statements = split_sql(sql)
             async with connection.cursor() as cursor:
                 for statement in statements:
-                    await cursor.execute(statement)
+                    try:
+                        await cursor.execute(statement)
+                    except Exception as exc:
+                        if is_duplicate_column_error(exc):
+                            print(f"SKIP duplicate column in {migration.name}")
+                            continue
+                        raise
             await record_migration(connection, migration.name, checksum)
             print(f"APPLIED {migration.name}")
     finally:
@@ -143,6 +149,11 @@ def split_sql(sql: str) -> list[str]:
     if statement:
         statements.append(statement)
     return statements
+
+
+def is_duplicate_column_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "Duplicate column" in message or "1060" in message
 
 
 if __name__ == "__main__":
